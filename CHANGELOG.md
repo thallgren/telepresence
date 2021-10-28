@@ -8,6 +8,8 @@
 
 - Bugfix: Outbound connections are now properly closed when the peer closes.
 
+- Change: Telepresence DNS now uses a very short TTL instead of explicitly flushing DNS by killing the `mDNSResponder` or doing `resolvectl flush-caches`
+
 ### 2.4.6 (November 2, 2021)
 
 - Feature: Telepresence CLI is now built and published for Apple silicon Macs.
