@@ -65,7 +65,7 @@ func (ki *installer) RemoveManagerAndAgents(c context.Context, agentsOnly bool, 
 		ai := ai // pin it
 		go func() {
 			defer wg.Done()
-			agent, err := ki.FindWorkload(c, ai.Namespace, ai.Name)
+			workload, err := ki.FindWorkload(c, ai.Namespace, ai.Name)
 			if err != nil {
 				if !errors2.IsNotFound(err) {
 					addError(err)
@@ -75,20 +75,30 @@ func (ki *installer) RemoveManagerAndAgents(c context.Context, agentsOnly bool, 
 
 			// Assume that the agent was added using the mutating webhook when no actions
 			// annotation can be found in the workload.
-			ann := agent.GetAnnotations()
+			ann := workload.GetAnnotations()
 			if ann == nil {
-				webhookAgentChannel <- agent
+				webhookAgentChannel <- workload
 				return
 			}
 			if _, ok := ann[annTelepresenceActions]; !ok {
-				webhookAgentChannel <- agent
+				webhookAgentChannel <- workload
 				return
 			}
-			if err = ki.undoObjectMods(c, agent); err != nil {
-				addError(err)
-				return
+
+			updater := func() (kates.Object, error) {
+				err := ki.undoObjectMods(c, workload)
+				if err != nil {
+					return nil, err
+				}
+				return ki.waitForApply(c, ai.Namespace, ai.Name, workload)
 			}
-			if err = ki.waitForApply(c, ai.Namespace, ai.Name, agent); err != nil {
+
+			if rs, ok := workload.(*kates.ReplicaSet); ok {
+				err = ki.updateReplicaSet(c, rs, ai.Namespace, ai.Name, updater)
+			} else {
+				_, err = updater()
+			}
+			if err != nil {
 				addError(err)
 			}
 		}()
@@ -348,15 +358,23 @@ already exist for this service`, kind, obj.GetName())
 	}
 
 	if update {
-		if err := ki.Client().Update(c, obj, obj); err != nil {
-			return "", "", err
-		}
-		if svc != nil {
-			if err := ki.Client().Update(c, svc, svc); err != nil {
-				return "", "", err
+		updater := func() (kates.Object, error) {
+			if err := ki.Client().Update(c, obj, obj); err != nil {
+				return nil, err
 			}
+			if svc != nil {
+				if err := ki.Client().Update(c, svc, svc); err != nil {
+					return nil, err
+				}
+			}
+			return ki.waitForApply(c, namespace, name, obj)
 		}
-		if err := ki.waitForApply(c, namespace, name, obj); err != nil {
+		if rs, ok := obj.(*kates.ReplicaSet); ok {
+			err = ki.updateReplicaSet(c, rs, namespace, name, updater)
+		} else {
+			_, err = updater()
+		}
+		if err != nil {
 			return "", "", err
 		}
 	}
@@ -403,7 +421,7 @@ func statefulSetUpdated(statefulSet *kates.StatefulSet, origGeneration int64) bo
 	return applied
 }
 
-func (ki *installer) waitForApply(c context.Context, namespace, name string, obj kates.Object) error {
+func (ki *installer) waitForApply(c context.Context, namespace, name string, obj kates.Object) (kates.Object, error) {
 	tos := &client.GetConfig(c).Timeouts
 	c, cancel := tos.TimeoutContext(c, client.TimeoutApply)
 	defer cancel()
@@ -414,19 +432,14 @@ func (ki *installer) waitForApply(c context.Context, namespace, name string, obj
 	}
 
 	var err error
-	if rs, ok := obj.(*kates.ReplicaSet); ok {
-		if err = ki.refreshReplicaSet(c, namespace, rs); err != nil {
-			return err
-		}
-	}
 	for {
 		dtime.SleepWithContext(c, time.Second)
 		if err = c.Err(); err != nil {
-			return err
+			return nil, err
 		}
 
 		if obj, err = ki.FindAgain(c, obj); err != nil {
-			return client.CheckTimeout(c, err)
+			return nil, client.CheckTimeout(c, err)
 		}
 
 		updated := false
@@ -440,43 +453,39 @@ func (ki *installer) waitForApply(c context.Context, namespace, name string, obj
 		}
 		if updated {
 			dlog.Debugf(c, "%s %s.%s successfully applied", obj.GetObjectKind().GroupVersionKind().Kind, name, namespace)
-			return nil
+			return obj, nil
 		}
 	}
 }
 
-// refreshReplicaSet finds pods owned by a given ReplicaSet and deletes them.
-// We need this because updating a Replica Set does *not* generate new
-// pods if the desired amount already exists.
-func (ki *installer) refreshReplicaSet(c context.Context, namespace string, rs *kates.ReplicaSet) error {
-	pods, err := ki.Pods(c, namespace)
+// updateReplicaSet will change the Spec.Replicas in the given replicaset to zero before calling the updater function. That
+// function is supposed to do an client.Update() call and then call waitForApply(). This function then continues by
+// restoring the Spec.Replicas and performing a new client.Update() followed by a waitForApply().
+func (ki *installer) updateReplicaSet(c context.Context, rs *kates.ReplicaSet, namespace, name string, updater func() (kates.Object, error)) error {
+	var origReplicas *int32
+	if origReplicas = rs.Spec.Replicas; origReplicas != nil {
+		if *origReplicas == 0 {
+			// Prevent second apply restoring replicas
+			origReplicas = nil
+		} else {
+			// Use zero replicas for the first apply, then restore
+			// the original replicas with a new apply.
+			zeroReplicas := int32(0)
+			rs.Spec.Replicas = &zeroReplicas
+		}
+	}
+	obj, err := updater()
 	if err != nil {
 		return err
 	}
-
-	for _, pod := range pods {
-		for _, ownerRef := range pod.OwnerReferences {
-			if ownerRef.UID == rs.UID {
-				dlog.Infof(c, "Deleting pod %s.%s owned by rs %s", pod.Name, pod.Namespace, rs.Name)
-				pod := &kates.Pod{
-					TypeMeta: kates.TypeMeta{
-						Kind: "Pod",
-					},
-					ObjectMeta: kates.ObjectMeta{
-						Namespace: pod.Namespace,
-						Name:      pod.Name,
-					},
-				}
-				if err = ki.Client().Delete(c, pod, nil); err != nil {
-					if kates.IsNotFound(err) || kates.IsConflict(err) {
-						// If an intercept creates a new pod by installing an agent, and the agent is then uninstalled shortly after, the
-						// old pod may still show up here during removal, and even after it has been removed if the removal completed
-						// after we obtained the pods list. This is OK. This pod will not be in our way.
-						continue
-					}
-				}
-			}
+	rs = obj.(*kates.ReplicaSet)
+	if origReplicas != nil {
+		rs.Spec.Replicas = origReplicas
+		if err := ki.Client().Update(c, rs, nil); err != nil {
+			return err
 		}
+		_, err := ki.waitForApply(c, namespace, name, rs)
+		return err
 	}
 	return nil
 }
@@ -525,7 +534,33 @@ func (ki *installer) undoObjectMods(c context.Context, obj kates.Object) error {
 			return err
 		}
 	}
-	return ki.Client().Update(c, obj, obj)
+
+	var origReplicas *int32
+	if rs, ok := obj.(*kates.ReplicaSet); ok {
+		origReplicas = rs.Spec.Replicas
+		zeroReplicas := int32(0)
+		rs.Spec.Replicas = &zeroReplicas
+	}
+
+	if err = ki.Client().Update(c, obj, obj); err != nil {
+		return nil
+	}
+
+	if origReplicas != nil {
+		obj.(*kates.ReplicaSet).Spec.Replicas = origReplicas
+		err = ki.Client().Update(c, obj, nil)
+	}
+
+	// A conflict here means that the object has changed since we last fetched it. Let's
+	// log that, refetch, undo the mods, and then try the update again.
+	dlog.Error(c, err)
+	if obj, err = ki.FindAgain(c, obj); err != nil {
+		return fmt.Errorf("unable to refetch object after conflict error: %w", err)
+	}
+	if _, err = undoObjectMods(c, obj); err != nil {
+		return err
+	}
+	return ki.Client().Update(c, obj, nil)
 }
 
 func undoObjectMods(c context.Context, obj kates.Object) (string, error) {
@@ -558,7 +593,7 @@ func (ki *installer) undoServiceMods(c context.Context, svc *kates.Service) erro
 	if err := undoServiceMods(c, svc); err != nil {
 		return err
 	}
-	return ki.Client().Update(c, svc, svc)
+	return ki.Client().Update(c, svc, nil)
 }
 
 func undoServiceMods(c context.Context, svc *kates.Service) error {
