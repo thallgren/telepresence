@@ -376,6 +376,7 @@ func (ata *addTrafficAgentAction) Do(obj kates.Object) error {
 	tplSpec.Spec.Volumes = append(tplSpec.Spec.Volumes, install.AgentVolume())
 	tplSpec.Spec.Containers = append(tplSpec.Spec.Containers,
 		install.AgentContainer(
+			obj.GetObjectKind().GroupVersionKind().Kind,
 			obj.GetName(),
 			ata.ImageName,
 			appContainer,

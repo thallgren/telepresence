@@ -2,10 +2,13 @@ package mutator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+
+	appsv1 "k8s.io/api/apps/v1"
 
 	admission "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -105,6 +108,13 @@ func agentInjector(ctx context.Context, req *admission.AdmissionRequest) ([]patc
 		}
 	}
 
+	wl, err := findOwnerWorkload(ctx, client, &pod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to obtain owner workload: %w", err)
+	}
+	jb, _ := json.MarshalIndent(wl, "", "  ")
+	dlog.Info(ctx, string(jb))
+
 	var appPort corev1.ContainerPort
 	switch {
 	case containerPortIndex >= 0:
@@ -137,7 +147,7 @@ func agentInjector(ctx context.Context, req *admission.AdmissionRequest) ([]patc
 		tpEnv["TELEPRESENCE_API_PORT"] = strconv.Itoa(int(env.APIPort))
 	}
 	patches = addTPEnv(&pod, appContainer, tpEnv, patches)
-	patches, err = addAgentContainer(ctx, svc, &pod, servicePort, appContainer, &appPort, setGID, podName, podNamespace, patches)
+	patches, err = addAgentContainer(ctx, svc, &pod, servicePort, appContainer, &appPort, setGID, wl.GetObjectKind().GroupVersionKind().Kind, podName, podNamespace, patches)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +221,7 @@ func addAgentContainer(
 	appContainer *corev1.Container,
 	appPort *corev1.ContainerPort,
 	setGID bool,
-	podName, namespace string,
+	workload, podName, namespace string,
 	patches []patchOperation,
 ) ([]patchOperation, error) {
 	env := managerutil.GetEnv(ctx)
@@ -275,6 +285,7 @@ func addAgentContainer(
 		Op:   "add",
 		Path: "/spec/containers/-",
 		Value: install.AgentContainer(
+			workload,
 			agentName,
 			env.AgentRegistry+"/"+env.AgentImage,
 			appContainer,
@@ -372,4 +383,29 @@ func hidePorts(pod *corev1.Pod, cn *corev1.Container, portName string, patches [
 		}
 	}
 	return patches
+}
+
+var workloadTypes = map[string]kates.Object{
+	"Deployment":  &appsv1.Deployment{TypeMeta: metav1.TypeMeta{Kind: "Deployment"}},
+	"ReplicaSet":  &appsv1.ReplicaSet{TypeMeta: metav1.TypeMeta{Kind: "ReplicaSet"}},
+	"StatefulSet": &appsv1.StatefulSet{TypeMeta: metav1.TypeMeta{Kind: "StatefulSet"}},
+	"DaemonSet":   &appsv1.DaemonSet{TypeMeta: metav1.TypeMeta{Kind: "DaemonSet"}},
+}
+
+func findOwnerWorkload(c context.Context, client *kates.Client, obj kates.Object) (kates.Object, error) {
+	refs := obj.GetOwnerReferences()
+	for i := range refs {
+		if or := &refs[i]; or.Controller != nil && *or.Controller {
+			if wl := workloadTypes[or.Kind]; wl != nil {
+				wl = wl.DeepCopyObject().(kates.Object)
+				wl.SetName(or.Name)
+				wl.SetNamespace(obj.GetNamespace())
+				if err := client.Get(c, wl, wl); err != nil {
+					return nil, err
+				}
+				return findOwnerWorkload(c, client, wl)
+			}
+		}
+	}
+	return obj, nil
 }

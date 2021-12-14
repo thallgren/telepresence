@@ -3,6 +3,7 @@ package userd_trafficmgr
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -350,6 +351,8 @@ already exist for this service`, kind, obj.GetName())
 	}
 
 	if update {
+		jb, _ := json.MarshalIndent(obj, "", "  ")
+		dlog.Info(c, string(jb))
 		if err := ki.Client().Update(c, obj, obj); err != nil {
 			return "", "", err
 		}

@@ -16,6 +16,7 @@ const AgentUID = int64(7777)
 
 // AgentContainer will return a configured traffic agent
 func AgentContainer(
+	workload string,
 	name string,
 	imageName string,
 	appContainer *corev1.Container,
@@ -38,7 +39,7 @@ func AgentContainer(
 		Image:           imageName,
 		Args:            []string{"agent"},
 		Ports:           []corev1.ContainerPort{port},
-		Env:             agentEnvironment(name, appContainer, appPort, apiPort, managerNamespace, port),
+		Env:             agentEnvironment(workload, name, appContainer, appPort, apiPort, managerNamespace, port),
 		EnvFrom:         appContainer.EnvFrom,
 		VolumeMounts:    agentVolumeMounts(appContainer.VolumeMounts),
 		SecurityContext: securityContext,
@@ -83,7 +84,7 @@ func InitContainer(imageName string, port corev1.ContainerPort, appPort int) cor
 	}
 }
 
-func agentEnvironment(agentName string, appContainer *kates.Container, appPort, apiPort int, managerNamespace string, port corev1.ContainerPort) []corev1.EnvVar {
+func agentEnvironment(workload, agentName string, appContainer *kates.Container, appPort, apiPort int, managerNamespace string, port corev1.ContainerPort) []corev1.EnvVar {
 	appEnv := appEnvironment(appContainer, apiPort)
 	env := make([]corev1.EnvVar, len(appEnv), len(appEnv)+7)
 	copy(env, appEnv)
@@ -111,6 +112,10 @@ func agentEnvironment(agentName string, appContainer *kates.Container, appPort, 
 					FieldPath: "status.podIP",
 				},
 			},
+		},
+		corev1.EnvVar{
+			Name:  EnvPrefix + "WORKLOAD",
+			Value: workload,
 		},
 		corev1.EnvVar{
 			Name:  EnvPrefix + "APP_PORT",

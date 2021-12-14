@@ -25,9 +25,22 @@ rules:
   resources:
   - services
   - namespaces
+  - replicasets
+  - daemonsets
+  - deployments
+  - statefulsets
   verbs:
   - get
   - list
+- apiGroups:
+  - "apps"
+  resources:
+  - replicasets
+  - daemonsets
+  - deployments
+  - statefulsets
+  verbs:
+  - get
 {{- if (not .Values.managerRbac.namespaced) }}
 - apiGroups:
   - ""

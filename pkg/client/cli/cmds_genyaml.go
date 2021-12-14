@@ -212,7 +212,9 @@ func (i *genContainerInfo) run(cmd *cobra.Command, _ []string) error {
 	if agentImage == "" {
 		agentImage = "tel2:" + strings.TrimPrefix(version.Version, "v")
 	}
+
 	agentContainer := install.AgentContainer(
+		obj.GetObjectKind().GroupVersionKind().Kind,
 		i.serviceName,
 		fmt.Sprintf("%s/%s", registry, agentImage),
 		container,
