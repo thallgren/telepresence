@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -10,13 +10,15 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
+	apps "k8s.io/api/apps/v1"
+	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/kubernetes"
 
+	"github.com/telepresenceio/telepresence/v2/pkg/agentmap"
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/userd/k8s"
 	"github.com/telepresenceio/telepresence/v2/pkg/install"
@@ -44,16 +46,29 @@ It is recommended that you not do this unless strictly necessary. Instead, we su
 			return fmt.Errorf("please run genyaml as \"genyaml container\" or \"genyaml volume\"")
 		},
 	}
-	cmd.PersistentFlags().StringVar(&info.inputFile, "input", "",
+	flags := cmd.PersistentFlags()
+	flags.StringVar(&info.inputFile, "input", "",
 		"Path to the yaml containing the workload definition (i.e. Deployment, StatefulSet, etc). Pass '-' for stdin.")
-	cmd.PersistentFlags().StringVar(&info.outputFile, "output", "-",
+	flags.StringVar(&info.outputFile, "output", "-",
 		"Path to the file to place the output in. Defaults to '-' which means stdout.")
 	_ = cmd.MarkPersistentFlagRequired("input")
 	cmd.AddCommand(
 		genContainerSubCommand(&info),
+		genAgentConfigMapSubCommand(&info),
 		genVolumeSubCommand(&info),
 	)
 	return cmd
+}
+
+func getInputReader(inputFile string) (io.ReadCloser, error) {
+	if inputFile == "-" {
+		return os.Stdin, nil
+	}
+	f, err := os.Open(inputFile)
+	if err != nil {
+		return nil, fmt.Errorf("unable to open input file %s: %w", inputFile, err)
+	}
+	return f, nil
 }
 
 func (i *genYAMLInfo) getOutputWriter() (io.WriteCloser, error) {
@@ -67,27 +82,39 @@ func (i *genYAMLInfo) getOutputWriter() (io.WriteCloser, error) {
 	return f, nil
 }
 
+func (i *genYAMLInfo) parseWorkload(ctx context.Context) (k8sapi.Workload, error) {
+	f, err := getInputReader(i.inputFile)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("error reading from %s: %w", i.inputFile, err)
+	}
+
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypes(schema.GroupVersion{Group: apps.GroupName, Version: "v1"}, &apps.StatefulSet{}, &apps.Deployment{}, &apps.ReplicaSet{})
+	codecFactory := serializer.NewCodecFactory(scheme)
+	deserializer := codecFactory.UniversalDeserializer()
+
+	obj, kind, err := deserializer.Decode(b, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse yaml in %s: %w", i.inputFile, err)
+	}
+	wl, err := k8sapi.WrapWorkload(obj)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected object of kind %s; please pass in a Deployment, ReplicaSet, or StatefulSet", kind)
+	}
+	return wl, nil
+}
+
 func (i *genYAMLInfo) writeObjToOutput(obj interface{}) error {
-	// So this sucks: Kubernetes structs don't have yaml serialization tags!
-	// This means that we can't just yaml.Marshal the object. Now, we could use
-	// the client-go to marshal it, but that's actually really hard given that
-	// we're dealing with partial objects (e.g. containers, not pods).
-	// However, it turns out that since k8s sends objects over the wire in json,
-	// the structs do have json serialization tags; so if we serialize the object to json,
-	// read it back as a plain old map, and then re-serialize to yaml, we'll get a reasonable result.
-	doc, err := json.Marshal(obj)
+	// We use sigs.ks8.io/yaml because it treats json serialization tags as if they were yaml tags.
+	doc, err := yaml.Marshal(obj)
 	if err != nil {
 		return fmt.Errorf("unable to marshal agent container: %w", err)
-	}
-	temp := map[string]interface{}{}
-	err = json.Unmarshal(doc, &temp)
-	if err != nil {
-		// Be a bit weird if this happened, but okay.
-		return fmt.Errorf("unable to unmarshal intermediate representation: %w", err)
-	}
-	doc, err = yaml.Marshal(&temp)
-	if err != nil {
-		return fmt.Errorf("unable to marshal intermediate representation to yaml: %w", err)
 	}
 	w, err := i.getOutputWriter()
 	if err != nil {
@@ -101,15 +128,57 @@ func (i *genYAMLInfo) writeObjToOutput(obj interface{}) error {
 	return nil
 }
 
-func (i *genYAMLInfo) getInputReader() (io.ReadCloser, error) {
-	if i.inputFile == "-" {
-		return os.Stdin, nil
+type genAgentConfigMap struct {
+	*genYAMLInfo
+}
+
+func genAgentConfigMapSubCommand(yamlInfo *genYAMLInfo) *cobra.Command {
+	info := genAgentConfigMap{genYAMLInfo: yamlInfo}
+	cmd := &cobra.Command{
+		Use:   "configmap",
+		Args:  cobra.NoArgs,
+		Short: "Generate YAML for the traffic-agent configmap entry.",
+		Long:  "Generate YAML for the traffic-agent configmap entry. See genyaml for more info on what this means",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return info.run(cmd, kubeFlagMap(kubeFlags))
+		},
 	}
-	f, err := os.Open(i.inputFile)
+	cmd.Flags().AddFlagSet(kubeFlags)
+	return cmd
+}
+
+func withK8sInterface(ctx context.Context, kubeFlags map[string]string) (context.Context, error) {
+	c, err := k8s.NewConfig(ctx, kubeFlags)
+	if err == nil {
+		if rc, err := c.ConfigFlags.ToRESTConfig(); err == nil {
+			if cs, err := kubernetes.NewForConfig(rc); err == nil {
+				ctx = k8sapi.WithK8sInterface(ctx, cs)
+			}
+		}
+	}
+	return ctx, err
+}
+
+func (g *genAgentConfigMap) run(cmd *cobra.Command, kubeFlags map[string]string) error {
+	ctx, err := withK8sInterface(cmd.Context(), kubeFlags)
 	if err != nil {
-		return nil, fmt.Errorf("unable to open input file %s: %w", i.inputFile, err)
+		return fmt.Errorf("unable to initialize k8s api: %w", err)
 	}
-	return f, nil
+
+	wl, err := g.parseWorkload(ctx)
+	if err != nil {
+		return err
+	}
+	am, err := agentmap.Generate(ctx, wl, &agentmap.GeneratorConfig{
+		AgentPort:             9900,
+		APIPort:               0,
+		AgentRegistryAndImage: "docker.io/datawire/tel2:" + strings.TrimPrefix(client.Version(), "v"),
+		ManagerNamespace:      "ambassador",
+	})
+	if err != nil {
+		return err
+	}
+	return g.writeObjToOutput(am)
 }
 
 type genContainerInfo struct {
@@ -139,7 +208,7 @@ func genContainerSubCommand(yamlInfo *genYAMLInfo) *cobra.Command {
 		"The name of the container hosting the application you wish to intercept.")
 	flags.IntVar(&info.port, "port", 0,
 		"The port number you wish to intercept")
-	flags.StringVar(&info.proto, "protocol", string(corev1.ProtocolTCP),
+	flags.StringVar(&info.proto, "protocol", string(core.ProtocolTCP),
 		`The transport protocol the port speaks, i.e. "tcp" or "udp"`)
 	flags.StringVar(&info.appProto, "app-protocol", "",
 		`The application protocol the port speaks, i.e. "http", "grpc", "https", ...`)
@@ -161,30 +230,11 @@ Defaults to the name of the deployment.`)
 func (i *genContainerInfo) run(cmd *cobra.Command, kubeFlags map[string]string) error {
 	ctx := cmd.Context()
 
-	f, err := i.getInputReader()
+	wl, err := i.parseWorkload(ctx)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	b, err := io.ReadAll(f)
-	if err != nil {
-		return fmt.Errorf("error reading from %s: %w", i.inputFile, err)
-	}
-
-	scheme := runtime.NewScheme()
-	scheme.AddKnownTypes(schema.GroupVersion{Group: appsv1.GroupName, Version: "v1"}, &appsv1.StatefulSet{}, &appsv1.Deployment{}, &appsv1.ReplicaSet{})
-	codecFactory := serializer.NewCodecFactory(scheme)
-	deserializer := codecFactory.UniversalDeserializer()
-
-	obj, kind, err := deserializer.Decode(b, nil, nil)
-	if err != nil {
-		return fmt.Errorf("unable to parse yaml in %s: %w", i.inputFile, err)
-	}
-	wl, err := k8sapi.WrapWorkload(obj)
-	if err != nil {
-		return fmt.Errorf("unexpected object of kind %s; please pass in a Deployment, ReplicaSet, or StatefulSet", kind)
-	}
 	containers := wl.GetPodTemplate().Spec.Containers
 	containerIdx := -1
 	for j, c := range containers {
@@ -194,7 +244,7 @@ func (i *genContainerInfo) run(cmd *cobra.Command, kubeFlags map[string]string) 
 		}
 	}
 	if containerIdx < 0 {
-		return fmt.Errorf("container %s not found in %s given", i.containerName, kind)
+		return fmt.Errorf("container %s not found in %s given", i.containerName, wl.GetKind())
 	}
 	container := &containers[containerIdx]
 
@@ -221,8 +271,8 @@ func (i *genContainerInfo) run(cmd *cobra.Command, kubeFlags map[string]string) 
 		i.serviceName,
 		fmt.Sprintf("%s/%s", registry, agentImage),
 		container,
-		corev1.ContainerPort{
-			Protocol:      corev1.Protocol(i.proto),
+		core.ContainerPort{
+			Protocol:      core.Protocol(i.proto),
 			ContainerPort: int32(i.agentPort),
 		},
 		i.port,

@@ -31,10 +31,10 @@ type agentInjectorConfig struct {
 
 type Map interface {
 	GetInto(string, string, interface{}) (bool, error)
-	Run(context.Context) error
+	Run(context.Context, string) error
 	Store(context.Context, *agentconfig.Sidecar, bool) error
 	DeleteMapsAndRolloutAll(ctx context.Context)
-	UninstallV25(ctx context.Context)
+	UninstallV25(ctx context.Context, extendedAgentImage string)
 }
 
 func decode(v string, into interface{}) error {
@@ -134,7 +134,7 @@ type entry struct {
 	value     string
 }
 
-func (c *configWatcher) Run(ctx context.Context) error {
+func (c *configWatcher) Run(ctx context.Context, extendedAgentImage string) error {
 	ctx, c.cancel = context.WithCancel(ctx)
 	addCh, delCh, err := c.Start(ctx)
 	if err != nil {
@@ -145,7 +145,7 @@ func (c *configWatcher) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case e := <-delCh:
-			dlog.Infof(ctx, "del %s.%s: %s", e.name, e.namespace, e.value)
+			dlog.Infof(ctx, "del %s.%s", e.name, e.namespace)
 			ac, wl, err := e.workload(ctx)
 			if err != nil {
 				dlog.Error(ctx, err)
@@ -157,14 +157,14 @@ func (c *configWatcher) Run(ctx context.Context) error {
 			}
 			triggerRollout(ctx, wl)
 		case e := <-addCh:
-			dlog.Infof(ctx, "add %s.%s: %s", e.name, e.namespace, e.value)
+			dlog.Infof(ctx, "add %s.%s", e.name, e.namespace)
 			ac, wl, err := e.workload(ctx)
 			if err != nil {
 				dlog.Error(ctx, err)
 				continue
 			}
 			if ac.Create {
-				if ac, err = agentmap.Generate(ctx, wl, managerutil.GetEnv(ctx).GeneratorConfig()); err != nil {
+				if ac, err = agentmap.Generate(ctx, wl, managerutil.GetEnv(ctx).GeneratorConfig(extendedAgentImage)); err != nil {
 					dlog.Error(ctx, err)
 				} else if err = c.Store(ctx, ac, false); err != nil {
 					dlog.Error(ctx, err)
@@ -379,7 +379,9 @@ func (c *configWatcher) DeleteMapsAndRolloutAll(ctx context.Context) {
 			e := &entry{name: k, namespace: ns, value: v}
 			ac, wl, err := e.workload(ctx)
 			if err != nil {
-				dlog.Errorf(ctx, "unable to get workload for %s.%s %s: %v", k, ns, v, err)
+				if !errors.IsNotFound(err) {
+					dlog.Errorf(ctx, "unable to get workload for %s.%s %s: %v", k, ns, v, err)
+				}
 				continue
 			}
 			if ac.Create {
@@ -397,7 +399,7 @@ func (c *configWatcher) DeleteMapsAndRolloutAll(ctx context.Context) {
 // UninstallV25 will undo changes that telepresence versions prior to 2.6.0 did to workloads and
 // also add an initial entry in the agents ConfigMap for all workloads that had an agent or
 // was annotated to inject an agent.
-func (c *configWatcher) UninstallV25(ctx context.Context) {
+func (c *configWatcher) UninstallV25(ctx context.Context, extendedAgentImage string) {
 	var affectedWorkloads []k8sapi.Workload
 	if len(c.namespaces) == 0 {
 		affectedWorkloads = v25uninstall.RemoveAgents(ctx, "")
@@ -406,7 +408,7 @@ func (c *configWatcher) UninstallV25(ctx context.Context) {
 			affectedWorkloads = append(affectedWorkloads, v25uninstall.RemoveAgents(ctx, ns)...)
 		}
 	}
-	gc := managerutil.GetEnv(ctx).GeneratorConfig()
+	gc := managerutil.GetEnv(ctx).GeneratorConfig(extendedAgentImage)
 	for _, wl := range affectedWorkloads {
 		ac, err := agentmap.Generate(ctx, wl, gc)
 		if err == nil {

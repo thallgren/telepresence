@@ -25,8 +25,25 @@ import (
 var podResource = meta.GroupVersionResource{Version: "v1", Group: "", Resource: "pods"}
 
 type agentInjector struct {
-	agentConfigs Map
-	terminating  int64
+	agentConfigs       Map
+	extendedAgentImage string
+	terminating        int64
+}
+
+func (a *agentInjector) agentImage(ctx context.Context) (img string, err error) {
+	if a.extendedAgentImage != "" {
+		return a.extendedAgentImage, nil
+	}
+	env := managerutil.GetEnv(ctx)
+	if env.AgentImage != "" {
+		a.extendedAgentImage = env.AgentRegistry + "/" + env.AgentImage
+		return a.extendedAgentImage, nil
+	}
+	if img, err = managerutil.AgentImageFromSystemA(ctx); err != nil {
+		return "", fmt.Errorf("unable to get Ambassador Cloud preferred agent image: %w", err)
+	}
+	a.extendedAgentImage = img
+	return img, nil
 }
 
 func getPod(req *admission.AdmissionRequest) (*core.Pod, error) {
@@ -75,6 +92,7 @@ func (a *agentInjector) inject(ctx context.Context, req *admission.AdmissionRequ
 	if err != nil {
 		return nil, err
 	}
+	env := managerutil.GetEnv(ctx)
 
 	var config *agentconfig.Sidecar
 	ia := pod.Annotations[agentconfig.InjectAnnotation]
@@ -97,7 +115,8 @@ func (a *agentInjector) inject(ctx context.Context, req *admission.AdmissionRequ
 				pod.Name, pod.Namespace, agentconfig.ContainerName, agentconfig.ConfigMap, agentconfig.InjectAnnotation)
 			return nil, nil
 		}
-		if config, err = agentmap.GenerateForPod(ctx, pod, managerutil.GetEnv(ctx).GeneratorConfig()); err != nil {
+		agentImage, err := a.agentImage(ctx)
+		if config, err = agentmap.GenerateForPod(ctx, pod, env.GeneratorConfig(agentImage)); err != nil {
 			return nil, err
 		}
 		if err = a.agentConfigs.Store(ctx, config, true); err != nil {
@@ -108,8 +127,6 @@ func (a *agentInjector) inject(ctx context.Context, req *admission.AdmissionRequ
 	}
 
 	// Create patch operations to add the traffic-agent sidecar
-	dlog.Infof(ctx, "Injecting %s into pod %s.%s", agentconfig.ContainerName, pod.Name, pod.Namespace)
-
 	var patches patchOps
 	patches = addInitContainer(ctx, pod, config, patches)
 	patches = addAgentContainer(ctx, pod, config, patches)
@@ -117,13 +134,12 @@ func (a *agentInjector) inject(ctx context.Context, req *admission.AdmissionRequ
 	patches = hidePorts(pod, config, patches)
 	patches = addPodAnnotations(ctx, pod, patches)
 
-	env := managerutil.GetEnv(ctx)
 	if env.APIPort != 0 {
 		tpEnv := make(map[string]string)
 		tpEnv["TELEPRESENCE_API_PORT"] = strconv.Itoa(int(env.APIPort))
 		patches = addTPEnv(pod, config, tpEnv, patches)
 	}
-	dlog.Infof(ctx, "Patches = %s", patches)
+	dlog.Infof(ctx, "Injecting %s into pod %s.%s, patch count %d", agentconfig.ContainerName, pod.Name, pod.Namespace, len(patches))
 	return patches, nil
 }
 
@@ -135,8 +151,8 @@ func (a *agentInjector) uninstall(ctx context.Context) {
 }
 
 // upgradeLegacy
-func (a *agentInjector) upgradeLegacy(ctx context.Context) {
-	a.agentConfigs.UninstallV25(ctx)
+func (a *agentInjector) upgradeLegacy(ctx context.Context, extendedAgentImage string) {
+	a.agentConfigs.UninstallV25(ctx, extendedAgentImage)
 }
 
 func needInitContainer(config *agentconfig.Sidecar) bool {
@@ -166,7 +182,7 @@ func addInitContainer(ctx context.Context, pod *core.Pod, config *agentconfig.Si
 	env := managerutil.GetEnv(ctx)
 	ic := core.Container{
 		Name:  agentconfig.InitContainerName,
-		Image: env.AgentRegistry + "/" + env.AgentImage,
+		Image: env.QualifiedAgentImage(),
 		Args:  []string{"agent-init"},
 		VolumeMounts: []core.VolumeMount{{
 			Name:      agentconfig.ConfigVolumeName,
