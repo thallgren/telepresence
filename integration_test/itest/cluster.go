@@ -92,13 +92,18 @@ func WithCluster(ctx context.Context, f func(ctx context.Context)) {
 	} else {
 		s.suffix = strconv.Itoa(os.Getpid())
 	}
+	t := getT(ctx)
 	s.testVersion, s.prePushed = os.LookupEnv("DEV_TELEPRESENCE_VERSION")
 	if !s.prePushed {
-		s.testVersion = "v2.6.0-gotest.z" + s.suffix
+		cmd := dexec.CommandContext(ctx, "go", "run", "./build-aux/genversion")
+		cmd.Dir, _ = filepath.Abs("..")
+		ver, err := cmd.CombinedOutput()
+		fmt.Println(string(ver))
+		require.NoError(t, err)
+		s.testVersion = strings.TrimSpace(string(ver))
 	}
 	version.Version = s.testVersion
 
-	t := getT(ctx)
 	s.agentImageName = "tel2"
 	s.agentImageTag = s.testVersion[1:]
 	if agentImageQN, ok := os.LookupEnv("DEV_AGENT_IMAGE"); ok {
