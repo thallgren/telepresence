@@ -118,7 +118,7 @@ func (h *dialer) Done() <-chan struct{} {
 
 func (h *dialer) handleControl(ctx context.Context, cm Message) {
 	switch cm.Code() {
-	case Disconnect: // Peer responded to our disconnect or wants to hard-close. No more messages will arrive
+	case Disconnect: // Peer wants to hard-close. No more messages will arrive
 		h.Stop(ctx)
 	case KeepAlive:
 		h.ResetIdle()
@@ -137,29 +137,35 @@ func (h *dialer) handleControl(ctx context.Context, cm Message) {
 
 // Stop will close the underlying TCP/UDP connection
 func (h *dialer) Stop(ctx context.Context) {
-	if atomic.CompareAndSwapInt32(&h.connected, connected, notConnected) {
-		dlog.Debugf(ctx, "   CONN %s explicitly closing connection", h.stream.ID())
-		_ = h.conn.Close()
+	id := h.stream.ID()
+	switch {
+	case atomic.CompareAndSwapInt32(&h.connected, connected, notConnected):
+		dlog.Debugf(ctx, "   CONN %s explicitly closing connection", id)
+	case atomic.CompareAndSwapInt32(&h.connected, disconnecting, notConnected):
+		dlog.Debugf(ctx, "   CONN %s closing connection", id)
+	default:
+		return
+	}
+	err := h.conn.Close()
+	if err != nil {
+		dlog.Debugf(ctx, "!! CONN %s, Close failed: %v", id, err)
 	}
 }
 
-func (h *dialer) startDisconnect(ctx context.Context) {
+func (h *dialer) startDisconnect(ctx context.Context, reason string) {
 	if atomic.CompareAndSwapInt32(&h.connected, connected, disconnecting) {
 		id := h.stream.ID()
-		dlog.Debugf(ctx, "   CONN %s disconnecting", id)
+		dlog.Debugf(ctx, "   CONN %s disconnecting %s", id, reason)
 		h.SetTTL(partlyClosedDuration)
-		if err := h.conn.Close(); err != nil {
-			dlog.Debugf(ctx, "!! CONN %s, Close failed: %v", id, err)
-		}
 	}
 }
 
 func (h *dialer) connToStreamLoop(ctx context.Context, wg *sync.WaitGroup) {
-	endReason := ""
+	var endReason string
 	endLevel := dlog.LogLevelDebug
 	id := h.stream.ID()
 
-	outgoing := make(chan Message, 5)
+	outgoing := make(chan Message, 50)
 	defer func() {
 		if !h.ResetIdle() {
 			// Hard close of peer. We don't want any more data
@@ -173,32 +179,15 @@ func (h *dialer) connToStreamLoop(ctx context.Context, wg *sync.WaitGroup) {
 		wg.Done()
 	}()
 
-	WriteLoop(ctx, h.stream, outgoing)
+	wg.Add(1)
+	WriteLoop(ctx, h.stream, outgoing, wg)
 
 	buf := make([]byte, 0x100000)
 	dlog.Debugf(ctx, "   CONN %s conn-to-stream loop started", id)
-	for atomic.LoadInt32(&h.connected) == connected {
+	for atomic.LoadInt32(&h.connected) != notConnected {
 		n, err := h.conn.Read(buf)
-		if err != nil {
-			switch {
-			case errors.Is(err, io.EOF):
-				endReason = "EOF was encountered"
-			case errors.Is(err, net.ErrClosed):
-				endReason = "the connection was closed"
-			default:
-				endReason = fmt.Sprintf("a read error occurred: %v", err)
-				endLevel = dlog.LogLevelError
-			}
-			h.startDisconnect(ctx)
-			return
-		}
-
-		dlog.Tracef(ctx, "<- CONN %s, len %d", id, n)
-		switch {
-		case !h.ResetIdle():
-			endReason = "it was idle for too long"
-			return
-		case n > 0:
+		if n > 0 {
+			dlog.Tracef(ctx, "<- CONN %s, len %d", id, n)
 			select {
 			case <-ctx.Done():
 				endReason = ctx.Err().Error()
@@ -206,7 +195,27 @@ func (h *dialer) connToStreamLoop(ctx context.Context, wg *sync.WaitGroup) {
 			case outgoing <- NewMessage(Normal, buf[:n]):
 			}
 		}
+
+		if err != nil {
+			switch {
+			case errors.Is(err, io.EOF):
+				endReason = "EOF was encountered"
+			case errors.Is(err, net.ErrClosed):
+				endReason = "the connection was closed"
+				h.startDisconnect(ctx, endReason)
+			default:
+				endReason = fmt.Sprintf("a read error occurred: %v", err)
+				endLevel = dlog.LogLevelError
+			}
+			return
+		}
+
+		if !h.ResetIdle() {
+			endReason = "it was idle for too long"
+			return
+		}
 	}
+	endReason = "dialer was stopped"
 }
 
 func (h *dialer) streamToConnLoop(ctx context.Context, wg *sync.WaitGroup) {
@@ -214,8 +223,8 @@ func (h *dialer) streamToConnLoop(ctx context.Context, wg *sync.WaitGroup) {
 	endLevel := dlog.LogLevelDebug
 	id := h.stream.ID()
 	defer func() {
+		h.startDisconnect(ctx, endReason)
 		wg.Done()
-		h.startDisconnect(ctx)
 		dlog.Logf(ctx, endLevel, "   CONN %s stream-to-conn loop ended because %s", id, endReason)
 	}()
 
@@ -230,10 +239,12 @@ func (h *dialer) streamToConnLoop(ctx context.Context, wg *sync.WaitGroup) {
 		case <-h.Idle():
 			endReason = "it was idle for too long"
 			return
-		case err := <-errCh:
-			dlog.Error(ctx, err)
-		case dg := <-incoming:
-			if dg == nil {
+		case err, ok := <-errCh:
+			if ok {
+				dlog.Error(ctx, err)
+			}
+		case dg, ok := <-incoming:
+			if !ok {
 				// h.incoming was closed by the reader and is now drained.
 				endReason = "there was no more input"
 				return
@@ -251,7 +262,6 @@ func (h *dialer) streamToConnLoop(ctx context.Context, wg *sync.WaitGroup) {
 			for n := 0; n < pn; {
 				wn, err := h.conn.Write(payload[n:])
 				if err != nil {
-					h.startDisconnect(ctx)
 					endReason = fmt.Sprintf("a write error occurred: %v", err)
 					endLevel = dlog.LogLevelError
 					return
