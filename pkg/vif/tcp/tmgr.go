@@ -20,28 +20,27 @@ func (h *handler) handleStreamControl(ctx context.Context, ctrl tunnel.Message) 
 	}
 }
 
-func (h *handler) sendToMgr(ctx context.Context, pkt Packet) bool {
+func (h *handler) sendToMgr(ctx context.Context, pkt Packet) {
 	select {
 	case h.toMgrCh <- pkt:
-		h.adjustReceiveWindow()
+		h.adjustReceiveWindow(ctx)
 		if h.packetLostTimer != nil {
 			h.packetLostTimer.Stop()
 			h.packetLostTimer = nil
 		}
-		return true
 	default:
 		// Manager doesn't keep up. Packet loss!
 		dlog.Debugf(ctx, "-> MGR %s packet lost!", pkt)
 		if h.packetLostTimer == nil {
 			h.packetLostTimer = time.AfterFunc(5*time.Second, func() {
-				h.Stop(ctx)
+				h.stopLocked(ctx)
 			})
 		}
-		return false
+		h.packetsLost++
 	}
 }
 
-func (h *handler) adjustReceiveWindow() {
+func (h *handler) adjustReceiveWindow(ctx context.Context) {
 	// Adjust window size based on current queue sizes. Both channels
 	// are of ioChannelSize.
 	inBuffer := float64(len(h.toMgrCh) + len(h.fromTun))
@@ -49,13 +48,13 @@ func (h *handler) adjustReceiveWindow() {
 	ratio := inBuffer / bufSize // 0.0 means empty, 1.0 is completely full
 	ratio = 0.5 - ratio         // 0.5 means empty, below zero means more than half full
 
-	windowSize := 0
+	windowSize := uint32(0)
 
 	// windowSize will remain at zero as long as the buffer is more than half full
 	if ratio > 0.0 {
 		// Make window size dependent on the number o element on the queue
 		ratio *= 2 // 1.0 means empty buffer
-		windowSize = int(float64(maxReceiveWindow) * ratio)
+		windowSize = uint32(float64(maxReceiveWindow) * ratio)
 	}
 
 	// Strip the last 8 bits so that we don't change so often
@@ -89,7 +88,7 @@ func (h *handler) readFromMgrLoop(ctx context.Context) {
 				h.handleStreamControl(ctx, m)
 				continue
 			}
-			if h.state() != stateIdle {
+			if h.state() != stateClosed {
 				h.processPayload(ctx, m.Payload())
 			}
 		}
@@ -152,7 +151,7 @@ func (h *handler) writeToMgrLoop(ctx context.Context) {
 				}
 				return
 			}
-			h.adjustReceiveWindow()
+			h.adjustReceiveWindow(ctx)
 			tcpHdr := pkt.Header()
 			payload := tcpHdr.Payload()
 			if tcpHdr.PSH() || buf.Len()+len(payload) >= maxBufSize {
