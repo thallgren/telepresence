@@ -25,6 +25,7 @@ const (
 	stateFinWait1
 	stateFinWait2
 	stateCloseWait
+	stateLastAck
 	stateClosing
 	stateTimeWait
 	stateClosed
@@ -46,10 +47,12 @@ func (s state) String() (txt string) {
 		txt = "FIN-WAIT-2"
 	case stateCloseWait:
 		txt = "CLOSE-WAIT"
-	case stateTimeWait:
-		txt = "TIME-WAIT"
+	case stateLastAck:
+		txt = "LAST-ACK"
 	case stateClosing:
 		txt = "CLOSING"
+	case stateTimeWait:
+		txt = "TIME-WAIT"
 	case stateClosed:
 		txt = "CLOSED"
 	default:
@@ -242,13 +245,14 @@ func (h *handler) setStopTimer(ctx context.Context) {
 }
 
 func (h *handler) stopLocked(ctx context.Context) {
-	dlog.Debugf(ctx, "   TUN %s STOP", h.id)
 	switch h.state() {
 	case stateEstablished, stateSynReceived:
+		dlog.Debugf(ctx, "   TUN %s active close", h.id)
 		h.setState(ctx, stateFinWait1)
 		h.sendFin(ctx, true)
 	case stateClosed:
 		if rm := h.remove; rm != nil {
+			dlog.Debugf(ctx, "   TUN %s closed", h.id)
 			h.remove = nil
 			rm()
 			// Drain any incoming to unblock
@@ -418,8 +422,8 @@ func (h *handler) sendFin(ctx context.Context, expectAck bool) {
 	l := uint32(0)
 	if expectAck {
 		l = 1
-		h.finalSeq = h.sequence
 	}
+	h.finalSeq = h.sequence + l
 	h.sendToTun(ctx, pkt, l)
 }
 
@@ -623,6 +627,7 @@ func (h *handler) handleReceived(ctx context.Context, pkt Packet) {
 	tcpHdr := pkt.Header()
 	lastAck := h.peerSequenceAcked
 	sq := tcpHdr.Sequence()
+	an := tcpHdr.AckNumber()
 	if tcpHdr.RST() {
 		if h.inReceiveWindow(sq) {
 			if sq == lastAck {
@@ -652,19 +657,21 @@ func (h *handler) handleReceived(ctx context.Context, pkt Packet) {
 			h.processOutOfOrderPackets(ctx, sq+uint32(payloadLen))
 			h.sendACK(ctx)
 		case tcpHdr.FIN():
-			h.peerSequenceToAck = lastAck + 1
+			h.peerSequenceToAck = sq + 1
 			switch h.state() {
 			case stateEstablished:
 				h.setState(ctx, stateCloseWait)
-				h.sendFin(ctx, false)
+				h.sendFin(ctx, true)
+				h.setState(ctx, stateLastAck)
 				return
 			case stateFinWait1:
-				if !tcpHdr.ACK() {
-					h.setState(ctx, stateClosing)
-					h.sendACK(ctx)
-				} else {
+				h.sendACK(ctx)
+				if tcpHdr.ACK() {
+					// FIN + ACK
 					h.setStopTimer(ctx)
 					h.setState(ctx, stateTimeWait)
+				} else { // FIN
+					h.setState(ctx, stateClosing)
 				}
 			case stateFinWait2:
 				h.setStopTimer(ctx)
@@ -674,17 +681,27 @@ func (h *handler) handleReceived(ctx context.Context, pkt Packet) {
 		default:
 			// ACK
 			switch h.state() {
-			case stateCloseWait: // ACK of FIN
-				h.setState(ctx, stateClosed)
-				h.stopLocked(ctx)
+			case stateLastAck: // ACK of FIN
+				if an == h.finalSeq {
+					h.setState(ctx, stateClosed)
+					h.stopLocked(ctx)
+				}
 			case stateClosing, stateTimeWait:
-				h.setStopTimer(ctx)
-				h.setState(ctx, stateTimeWait)
+				if an == h.finalSeq {
+					h.setStopTimer(ctx)
+					h.setState(ctx, stateTimeWait)
+				}
 			case stateFinWait1:
-				h.setState(ctx, stateFinWait2)
+				if an == h.finalSeq {
+					h.setStopTimer(ctx)
+					h.setState(ctx, stateFinWait2)
+				}
 			}
 		}
 	case sq > lastAck:
+		dlog.Tracef(ctx, "   CON %s, sq %d, an %d, wz %d, len %d, flags %s, ack-diff %d",
+			h.id, sq-h.ackStart, an-h.sqStart, tcpHdr.WindowSize(), payloadLen, tcpHdr.Flags(), sq-lastAck)
+
 		if sq <= h.lastKnown {
 			// Previous packet lost by us. Don't ack this one, just treat it
 			// as the next lost packet.
@@ -700,9 +717,6 @@ func (h *handler) handleReceived(ctx context.Context, pkt Packet) {
 		if payloadLen > 0 {
 			// Oops. Packet loss! Let sender know by sending an ACK so that we ack the receipt
 			// and also tell the sender about our expected number
-			dlog.Tracef(ctx, "   CON %s, sq %d, an %d, wz %d, len %d, flags %s, ack-diff %d",
-				h.id, sq-h.ackStart, tcpHdr.AckNumber()-h.sqStart, tcpHdr.WindowSize(), payloadLen, tcpHdr.Flags(), sq-lastAck)
-
 			if h.peerPermitsSACK {
 				h.addOutOfOrderPacket(pkt)
 			}
@@ -710,6 +724,7 @@ func (h *handler) handleReceived(ctx context.Context, pkt Packet) {
 		}
 	case sq == lastAck-1 && payloadLen == 0:
 		// keep alive, force is needed because the ackNbr is unchanged
+		dlog.Tracef(ctx, "   CON %s, keep-alive", h.id)
 		h.peerSequenceAcked--
 		h.sendACK(ctx)
 		go h.sendStreamControl(ctx, tunnel.KeepAlive)
@@ -717,7 +732,7 @@ func (h *handler) handleReceived(ctx context.Context, pkt Packet) {
 		// resend of already acknowledged packet. Just ignore
 		if payloadLen > 0 {
 			dlog.Tracef(ctx, "   CON %s, sq %d, an %d, wz %d, len %d, flags %s, resends already acked",
-				h.id, sq-h.ackStart, tcpHdr.AckNumber()-h.sqStart, tcpHdr.WindowSize(), payloadLen, tcpHdr.Flags())
+				h.id, sq-h.ackStart, an-h.sqStart, tcpHdr.WindowSize(), payloadLen, tcpHdr.Flags())
 		}
 	}
 }

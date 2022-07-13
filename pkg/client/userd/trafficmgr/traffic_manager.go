@@ -174,6 +174,9 @@ type TrafficManager struct {
 
 	sessionServices []SessionService
 	sr              *scout.Reporter
+
+	// useFtp indicates that FTP is preferred over SFTP
+	useFtp bool
 }
 
 // interceptResult is what gets written to the activeInterceptsWaiters channels
@@ -453,6 +456,7 @@ func connectMgr(c context.Context, cluster *k8s.Cluster, installID string, svc S
 		localIntercepts:     map[string]string{},
 		currentInterceptors: map[string]int{},
 		wlWatcher:           newWASWatcher(),
+		useFtp:              true,
 	}, nil
 }
 

@@ -70,7 +70,10 @@ func (h *handler) readFromMgrLoop(ctx context.Context) {
 		}
 	}()
 	h.wg.Add(1)
-	defer h.wg.Done()
+	defer func() {
+		h.Stop(ctx) // Send FIN and move to stateFinWait1
+		h.wg.Done()
+	}()
 	msgCh, fromMgrErrs := tunnel.ReadLoop(ctx, h.stream)
 	for {
 		select {
