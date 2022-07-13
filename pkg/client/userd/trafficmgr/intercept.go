@@ -817,12 +817,14 @@ func (tm *TrafficManager) mountFtp(ctx context.Context, mf mountForward, mountPo
 	return client.Retry(ctx, "ftp", func(ctx context.Context) error {
 		// FTPs remote mount is already relative to the agentconfig.ExportsMountPoint
 		rmp := strings.TrimPrefix(mf.RemoteMountPoint, agentconfig.ExportsMountPoint)
+		ftpMethod := "nocwd" // favor fewer interactions for slightly more data
+		if runtime.GOOS == "darwin" {
+			ftpMethod = "singlecwd" // because "nocwd" is not supported on darwin
+		}
 		ftpArgs := []string{
 			// FTP options
-			"-d",
-			"-o", "ftpfs_debug=3",
 			"-o", "utf8",
-			"-o", "ftp_method=nocwd", // favor fewer interactions for slightly more data
+			"-o", "ftp_method=" + ftpMethod, // favor fewer interactions for slightly more data
 			"-o", "enable_epsv", // EPSV slightly more effective than PASV when the IP is fixed
 
 			// FUSE options
