@@ -447,7 +447,7 @@ func (s *session) checkConnectivity(ctx context.Context, info *manager.ClusterIn
 		return
 	}
 	ip := net.IP(info.ManagerPodIp).String()
-	tCtx, tCancel := context.WithTimeout(ctx, 2*time.Second)
+	tCtx, tCancel := client.GetConfig(ctx).Timeouts.TimeoutContext(ctx, client.TimeoutConnectivityCheck)
 	defer tCancel()
 	conn, err := grpc.DialContext(tCtx, fmt.Sprintf("%s:8081", ip), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
