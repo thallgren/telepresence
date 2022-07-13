@@ -249,7 +249,7 @@ func (h *handler) stopLocked(ctx context.Context) {
 	case stateEstablished, stateSynReceived:
 		dlog.Debugf(ctx, "   TUN %s active close", h.id)
 		h.setState(ctx, stateFinWait1)
-		h.sendFin(ctx, true)
+		h.sendFin(ctx)
 	case stateClosed:
 		if rm := h.remove; rm != nil {
 			dlog.Debugf(ctx, "   TUN %s closed", h.id)
@@ -415,16 +415,13 @@ func (h *handler) newResponse(ctx context.Context, payloadLen int) Packet {
 	return pkt
 }
 
-func (h *handler) sendFin(ctx context.Context, expectAck bool) {
+func (h *handler) sendFin(ctx context.Context) {
 	pkt := NewReplyPacket(HeaderLen, 0, h.id)
 	tcpHdr := pkt.Header()
+	tcpHdr.SetACK(true)
 	tcpHdr.SetFIN(true)
-	l := uint32(0)
-	if expectAck {
-		l = 1
-	}
-	h.finalSeq = h.sequence + l
-	h.sendToTun(ctx, pkt, l)
+	h.finalSeq = h.sequence
+	h.sendToTun(ctx, pkt, 1)
 }
 
 func (h *handler) sendToTun(ctx context.Context, pkt Packet, seqAdd uint32) {
@@ -457,12 +454,12 @@ func (h *handler) sendSynReply(ctx context.Context, syn Packet) {
 }
 
 func (h *handler) sendSyn(ctx context.Context) {
-	hl := HeaderLen
-	hl += 12 // for the Maximum Segment Size, Window Scale, and Selective Ack Permitted options
+	hl := HeaderLen + 12 // for the Maximum Segment Size, Window Scale, and Selective Ack Permitted options
 
-	pkt := h.newResponse(ctx, hl)
+	pkt := NewReplyPacket(hl, 0, h.id)
 	tcpHdr := pkt.Header()
 	tcpHdr.SetSYN(true)
+	tcpHdr.SetACK(true)
 	tcpHdr.SetWindowSize(maxReceiveWindow >> myWindowScale) // The SYN packet itself is not subject to scaling
 
 	// adjust data offset to account for options
@@ -507,7 +504,7 @@ func (h *handler) preparePackageFromPayload(ctx context.Context, data []byte, st
 	if window < minWin {
 		// The intended receiver is currently not accepting data. We must
 		// wait for the window to increase.
-		dlog.Tracef(ctx, "   CON %s TCP window is too small (%d < %d)", h.id, window, minWin)
+		dlog.Tracef(ctx, "   CON %s TCP window is too small %d, %d, %d (%d < %d)", h.id, h.peerWindow, h.sequence, h.sequenceAcked, window, minWin)
 		if !h.awaitWindowSize(ctx, minWin) {
 			return 0, nil
 		}
@@ -661,7 +658,7 @@ func (h *handler) handleReceived(ctx context.Context, pkt Packet) {
 			switch h.state() {
 			case stateEstablished:
 				h.setState(ctx, stateCloseWait)
-				h.sendFin(ctx, true)
+				h.sendFin(ctx)
 				h.setState(ctx, stateLastAck)
 				return
 			case stateFinWait1:
