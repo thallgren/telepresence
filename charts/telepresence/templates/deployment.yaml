@@ -111,13 +111,31 @@ spec:
             value: "{{ join " " . }}"
           {{- end }}
           {{- end }}
-          {{- with .Values.dnsConfig.alsoProxySubnets }}
-          - name: ALSO_PROXY_SUBNETS
+          {{- with .Values.client }}
+          {{- with .routing }}
+          {{- with .alsoProxySubnets }}
+          - name: CLIENT_ROUTING_ALSO_PROXY_SUBNETS
             value: "{{ join " " . }}"
           {{- end }}
-          {{- with .Values.dnsConfig.neverProxySubnets }}
-          - name: NEVER_PROXY_SUBNETS
+          {{- with .neverProxySubnets }}
+          - name: CLIENT_ROUTING_NEVER_PROXY_SUBNETS
             value: "{{ join " " . }}"
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.dnsConfig.alsoProxySubnets }}
+          {{- if $.Values.client.routing.alsoProxySubnets }}
+          {{- else }}
+          - name: CLIENT_ROUTING_ALSO_PROXY_SUBNETS
+            value: "{{ join " " . }}"
+          {{- end }}
+          {{- end }}
+          {{- with .Values.dnsConfig.neverProxySubnets }}
+          {{- if $.Values.client.routing.neverProxySubnets }}
+          {{- else }}
+          - name: CLIENT_ROUTING_NEVER_PROXY_SUBNETS
+            value: "{{ join " " . }}"
+          {{- end }}
           {{- end }}
           ports:
           - name: api
