@@ -112,6 +112,8 @@ spec:
           {{- end }}
           {{- end }}
           {{- with .Values.client }}
+          - name: CLIENT_CONNECTION_TTL
+            value: "{{ .connectionTTL }}"
           {{- with .routing }}
           {{- with .alsoProxySubnets }}
           - name: CLIENT_ROUTING_ALSO_PROXY_SUBNETS
