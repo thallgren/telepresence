@@ -2,6 +2,7 @@ package dnsproxy
 
 import (
 	"net"
+	"runtime"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -12,16 +13,13 @@ import (
 )
 
 func Test_dnsLookup(t *testing.T) {
-	tests := []struct {
+	type tType struct {
 		qType uint16
 		qName string
-	}{
+	}
+	tests := []tType{
 		{
 			dns.TypeA,
-			"google.com.",
-		},
-		{
-			dns.TypeAAAA,
 			"google.com.",
 		},
 		{
@@ -44,6 +42,14 @@ func Test_dnsLookup(t *testing.T) {
 			dns.TypeSRV,
 			"_myservice._tcp.tada.se.",
 		},
+	}
+	// AAAA returns an error on Windows:
+	// "getaddrinfow: The requested name is valid, but no data of the requested type was found"
+	if runtime.GOOS != "windows" {
+		tests = append(tests, tType{
+			dns.TypeAAAA,
+			"google.com.",
+		})
 	}
 	for _, tt := range tests {
 		t.Run(dns.TypeToString[tt.qType], func(t *testing.T) {
