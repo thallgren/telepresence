@@ -122,6 +122,16 @@ spec:
             value: "{{ join " " . }}"
           {{- end }}
           {{- end }}
+          {{- with .dns }}
+          {{- with .excludeSuffixes }}
+          - name: CLIENT_DNS_EXCLUDE_SUFFIXES
+            value: "{{ join " " . }}"
+          {{- end }}
+          {{- with .includeSuffixes }}
+          - name: CLIENT_DNS_INCLUDE_SUFFIXES
+            value: "{{ join " " . }}"
+          {{- end }}
+          {{- end }}
           {{- end }}
           {{- with .Values.dnsConfig.alsoProxySubnets }}
           {{- if $.Values.client.routing.alsoProxySubnets }}
