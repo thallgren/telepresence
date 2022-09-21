@@ -19,6 +19,47 @@ const dnsTTL = 4
 const arpaV4 = ".in-addr.arpa."
 const arpaV6 = ".ip6.arpa."
 
+type RRs []dns.RR
+
+func writeRR(rr dns.RR, bf *strings.Builder) {
+	switch rr := rr.(type) {
+	case *dns.A:
+		bf.WriteString(rr.A.String())
+	case *dns.AAAA:
+		bf.WriteString(rr.AAAA.String())
+	case *dns.PTR:
+		bf.WriteString(rr.Ptr)
+	case *dns.CNAME:
+		bf.WriteString(rr.Target)
+	case *dns.MX:
+		fmt.Fprintf(bf, "%s(pref %d)", rr.Mx, rr.Preference)
+	case *dns.NS:
+		bf.WriteString(rr.Ns)
+	case *dns.SRV:
+		fmt.Fprintf(bf, "%s(port %d, prio %d, weight %d)", rr.Target, rr.Port, rr.Priority, rr.Weight)
+	case *dns.TXT:
+		bf.WriteString(strings.Join(rr.Txt, ","))
+	default:
+		bf.WriteString(rr.String())
+	}
+}
+
+func (a RRs) String() string {
+	if len(a) == 0 {
+		return "EMPTY"
+	}
+	bf := strings.Builder{}
+	bf.WriteByte('[')
+	for i, rr := range a {
+		if i > 0 {
+			bf.WriteByte(',')
+		}
+		writeRR(rr, &bf)
+	}
+	bf.WriteByte(']')
+	return bf.String()
+}
+
 func nibbleToInt(v string) (uint8, bool) {
 	if len(v) != 1 {
 		return 0, false
@@ -77,10 +118,10 @@ func NewHeader(qName string, qType uint16) dns.RR_Header {
 	return dns.RR_Header{Name: qName, Rrtype: qType, Class: dns.ClassINET, Ttl: dnsTTL}
 }
 
-func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, error) {
+func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
 	var err error
 
-	makeError := func(err error) ([]dns.RR, int, error) {
+	makeError := func(err error) (RRs, int, error) {
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) {
 			switch {
@@ -95,7 +136,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 		return nil, dns.RcodeServerFailure, status.Error(codes.Internal, err.Error())
 	}
 
-	var answer []dns.RR
+	var answer RRs
 	r := &net.Resolver{StrictErrors: true}
 	switch qType {
 	case dns.TypeA:
@@ -103,7 +144,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 		if ips, err = r.LookupIP(ctx, "ip4", qName[:len(qName)-1]); err != nil {
 			return makeError(err)
 		}
-		answer = make([]dns.RR, 0, len(ips))
+		answer = make(RRs, 0, len(ips))
 		for _, ip := range ips {
 			if ip4 := ip.To4(); ip4 != nil {
 				answer = append(answer, &dns.A{
@@ -137,7 +178,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 		if names, err = r.LookupAddr(ctx, ip.String()); err != nil {
 			return makeError(err)
 		}
-		answer = make([]dns.RR, len(names))
+		answer = make(RRs, len(names))
 		for i, n := range names {
 			answer[i] = &dns.PTR{
 				Hdr: NewHeader(qName, qType),
@@ -151,7 +192,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 		if name, err = r.LookupCNAME(ctx, qName); err != nil {
 			return makeError(err)
 		}
-		answer = []dns.RR{&dns.CNAME{
+		answer = RRs{&dns.CNAME{
 			Hdr:    NewHeader(qName, qType),
 			Target: name,
 		}}
@@ -160,7 +201,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 		if mx, err = r.LookupMX(ctx, qName[:len(qName)-1]); err != nil {
 			return makeError(err)
 		}
-		answer = make([]dns.RR, len(mx))
+		answer = make(RRs, len(mx))
 		for i, r := range mx {
 			answer[i] = &dns.MX{
 				Hdr:        NewHeader(qName, qType),
@@ -173,7 +214,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 		if ns, err = r.LookupNS(ctx, qName[:len(qName)-1]); err != nil {
 			return makeError(err)
 		}
-		answer = make([]dns.RR, len(ns))
+		answer = make(RRs, len(ns))
 		for i, n := range ns {
 			answer[i] = &dns.NS{
 				Hdr: NewHeader(qName, qType),
@@ -200,7 +241,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 				return rrs, rCode, err
 			}
 		}
-		answer = make([]dns.RR, len(srvs))
+		answer = make(RRs, len(srvs))
 		for i, s := range srvs {
 			answer[i] = &dns.SRV{
 				Hdr:      NewHeader(qName, qType),
@@ -215,7 +256,7 @@ func Lookup(ctx context.Context, qType uint16, qName string) ([]dns.RR, int, err
 		if names, err = r.LookupTXT(ctx, qName); err != nil {
 			return makeError(err)
 		}
-		answer = []dns.RR{&dns.TXT{
+		answer = RRs{&dns.TXT{
 			Hdr: NewHeader(qName, qType),
 			Txt: names,
 		}}
