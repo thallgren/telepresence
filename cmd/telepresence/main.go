@@ -10,6 +10,7 @@ import (
 
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli"
+	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/cliutil"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/output"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/errcat"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/logging"
@@ -57,6 +58,9 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
+		if cli.IsCommand("quit") {
+			ctx = cliutil.QuittingContext(ctx)
+		}
 		cfg, err := client.LoadConfig(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to load config: %v", err)
