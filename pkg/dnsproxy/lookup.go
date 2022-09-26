@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/datawire/dlib/dlog"
 	"github.com/telepresenceio/telepresence/v2/pkg/iputil"
 )
 
@@ -118,30 +119,63 @@ func NewHeader(qName string, qType uint16) dns.RR_Header {
 	return dns.RR_Header{Name: qName, Rrtype: qType, Class: dns.ClassINET, Ttl: dnsTTL}
 }
 
-func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
-	var err error
-
-	makeError := func(err error) (RRs, int, error) {
-		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) {
-			switch {
-			case dnsErr.IsNotFound:
-				return nil, dns.RcodeNameError, nil
-			case dnsErr.IsTemporary:
-				return nil, dns.RcodeServerFailure, status.Error(codes.Unavailable, dnsErr.Error())
-			case dnsErr.IsTimeout:
-				return nil, dns.RcodeServerFailure, status.Error(codes.DeadlineExceeded, dnsErr.Error())
-			}
+// useLookupName takes care of an undocumented "feature" in some lookup functions.
+// If the name ends with a dot, then no search path will be applied. If however,
+// the name doesn't end with a dot, the search path is always applied and the name
+// is never used verbatim.
+func useLookupName(qName string) (string, bool) {
+	dots := 0
+	name := qName[:len(qName)-1]
+	for _, c := range qName {
+		if c == '.' {
+			dots++
 		}
-		return nil, dns.RcodeServerFailure, status.Error(codes.Internal, err.Error())
 	}
+	switch dots {
+	case 1:
+		// singleton name, it's safe to assume that a search path must be applied
+		return name, true
+	case 2, 3, 4:
+		// might need a search path, or might be a full name.
+		return name, false
+	default:
+		// With > 4 dots, we can safely assume that no search path should be applied
+		return qName, true
+	}
+}
 
+func lookupIP(ctx context.Context, network, qName string, r *net.Resolver) ([]net.IP, error) {
+	name, final := useLookupName(qName)
+	ips, err := r.LookupIP(ctx, network, name)
+	if err != nil && !final {
+		dlog.Errorf(ctx, "LookupIP failed, trying LookupIP %q", qName)
+		ips, err = r.LookupIP(ctx, network, qName)
+	}
+	return ips, err
+}
+
+func makeError(err error) (RRs, int, error) {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		switch {
+		case dnsErr.IsNotFound:
+			return nil, dns.RcodeNameError, nil
+		case dnsErr.IsTemporary:
+			return nil, dns.RcodeServerFailure, status.Error(codes.Unavailable, dnsErr.Error())
+		case dnsErr.IsTimeout:
+			return nil, dns.RcodeServerFailure, status.Error(codes.DeadlineExceeded, dnsErr.Error())
+		}
+	}
+	return nil, dns.RcodeServerFailure, status.Error(codes.Internal, err.Error())
+}
+
+func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
 	var answer RRs
 	r := &net.Resolver{StrictErrors: true}
 	switch qType {
 	case dns.TypeA:
-		var ips iputil.IPs
-		if ips, err = r.LookupIP(ctx, "ip4", qName[:len(qName)-1]); err != nil {
+		ips, err := lookupIP(ctx, "ip4", qName, r)
+		if err != nil {
 			return makeError(err)
 		}
 		answer = make(RRs, 0, len(ips))
@@ -154,8 +188,8 @@ func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
 			}
 		}
 	case dns.TypeAAAA:
-		var ips iputil.IPs
-		if ips, err = r.LookupIP(ctx, "ip6", qName[:len(qName)-1]); err != nil {
+		ips, err := lookupIP(ctx, "ip6", qName, r)
+		if err != nil {
 			return makeError(err)
 		}
 		answer = make([]dns.RR, 0, len(ips))
@@ -186,19 +220,21 @@ func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
 			}
 		}
 	case dns.TypeCNAME:
-		// We use qName verbatim in the LookupCNAME call, because it requires the trailing dot,
-		// because hey, who needs a consistent API?
-		var name string
-		if name, err = r.LookupCNAME(ctx, qName); err != nil {
+		name, final := useLookupName(qName)
+		target, err := r.LookupCNAME(ctx, name)
+		if err != nil && !final {
+			target, err = r.LookupCNAME(ctx, qName)
+		}
+		if err != nil {
 			return makeError(err)
 		}
 		answer = RRs{&dns.CNAME{
 			Hdr:    NewHeader(qName, qType),
-			Target: name,
+			Target: target,
 		}}
 	case dns.TypeMX:
-		var mx []*net.MX
-		if mx, err = r.LookupMX(ctx, qName[:len(qName)-1]); err != nil {
+		mx, err := r.LookupMX(ctx, qName[:len(qName)-1])
+		if err != nil {
 			return makeError(err)
 		}
 		answer = make(RRs, len(mx))
@@ -210,8 +246,8 @@ func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
 			}
 		}
 	case dns.TypeNS:
-		var ns []*net.NS
-		if ns, err = r.LookupNS(ctx, qName[:len(qName)-1]); err != nil {
+		ns, err := r.LookupNS(ctx, qName[:len(qName)-1])
+		if err != nil {
 			return makeError(err)
 		}
 		answer = make(RRs, len(ns))
@@ -222,8 +258,8 @@ func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
 			}
 		}
 	case dns.TypeSRV:
-		var srvs []*net.SRV
-		if _, srvs, err = r.LookupSRV(ctx, "", "", qName[:len(qName)-1]); err != nil {
+		_, srvs, err := r.LookupSRV(ctx, "", "", qName[:len(qName)-1])
+		if err != nil {
 			rrs, rCode, err := makeError(err)
 			if rCode != dns.RcodeNameError {
 				return rrs, rCode, err
@@ -252,8 +288,8 @@ func Lookup(ctx context.Context, qType uint16, qName string) (RRs, int, error) {
 			}
 		}
 	case dns.TypeTXT:
-		var names []string
-		if names, err = r.LookupTXT(ctx, qName); err != nil {
+		names, err := r.LookupTXT(ctx, qName)
+		if err != nil {
 			return makeError(err)
 		}
 		answer = RRs{&dns.TXT{
