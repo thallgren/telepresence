@@ -64,23 +64,19 @@ func IsRootDaemonRunning(ctx context.Context) (bool, error) {
 	}
 }
 
-// WithRootDaemon (1) ensures that the daemon is running
-//
-// Nested calls to WithRootDaemon will reuse the outer connection.
-func WithRootDaemon(ctx context.Context, fn func(context.Context) error) error {
+// EnsureRootDaemonRunning ensures that the daemon is running
+func EnsureRootDaemonRunning(ctx context.Context) error {
 	running, err := IsRootDaemonRunning(ctx)
-	if err != nil {
+	if err != nil || running {
 		return err
 	}
-	if !running {
-		if err = launchDaemon(ctx); err != nil {
-			return fmt.Errorf("failed to launch the daemon service: %w", err)
-		}
-		if err = client.WaitUntilSocketAppears("daemon", client.DaemonSocketName, 10*time.Second); err != nil {
-			return fmt.Errorf("daemon service did not start: %w", err)
-		}
+	if err = launchDaemon(ctx); err != nil {
+		return fmt.Errorf("failed to launch the daemon service: %w", err)
 	}
-	return fn(ctx)
+	if err = client.WaitUntilSocketAppears("daemon", client.DaemonSocketName, 10*time.Second); err != nil {
+		return fmt.Errorf("daemon service did not start: %w", err)
+	}
+	return nil
 }
 
 // Disconnect shuts down a session in the root daemon. When it shuts down, it will tell the connector to shut down.

@@ -199,6 +199,7 @@ message ConnectRequest {
   repeated string mapped_namespaces = 2;
   reserved 3;
   bool is_pod_daemon = 4;
+  bool need_root_daemon = 5;
 }
 
 message ConnectInfo {
