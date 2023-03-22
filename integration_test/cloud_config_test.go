@@ -69,8 +69,12 @@ func (s *notConnectedSuite) Test_CloudNeverProxy() {
 	require.NoError(err)
 	_, err = f.Write(b)
 	require.NoError(err)
-
-	itest.TelepresenceOk(ctx, "helm", "upgrade", "--set", "logLevel=debug,agent.logLevel=debug", "-f", values)
+	itest.TelepresenceOk(itest.WithUser(ctx, "default"), "helm", "--manager-namespace", s.ManagerNamespace(), "upgrade",
+		"--set", "logLevel=debug,agent.logLevel=debug",
+		"--set", fmt.Sprintf("managerRbac.namespaces={%s,%s}", s.ManagerNamespace(), s.AppNamespace()),
+		"-f", filepath.Join("testdata", "namespaced-values.yaml"),
+		"-f", values,
+	)
 	defer s.rollbackTM()
 
 	s.Eventually(func() bool {
@@ -122,7 +126,11 @@ func (s *notConnectedSuite) Test_RootdCloudLogLevel() {
 	}
 	rootLog.Close()
 
-	itest.TelepresenceOk(ctx, "helm", "upgrade", "--set", "logLevel=debug,agent.logLevel=debug,client.logLevels.rootDaemon=trace")
+	itest.TelepresenceOk(itest.WithUser(ctx, "default"), "helm", "--manager-namespace", s.ManagerNamespace(), "upgrade",
+		"--set", "logLevel=debug,agent.logLevel=debug,client.logLevels.rootDaemon=trace",
+		"--set", fmt.Sprintf("managerRbac.namespaces={%s,%s}", s.ManagerNamespace(), s.AppNamespace()),
+		"-f", filepath.Join("testdata", "namespaced-values.yaml"),
+	)
 	defer s.rollbackTM()
 
 	ctx = itest.WithConfig(ctx, func(cfg *client.Config) {
@@ -212,7 +220,11 @@ func (s *notConnectedSuite) Test_UserdCloudLogLevel() {
 	}
 	logF.Close()
 
-	itest.TelepresenceOk(ctx, "helm", "upgrade", "--set", "logLevel=debug,agent.logLevel=debug,client.logLevels.userDaemon=trace")
+	itest.TelepresenceOk(itest.WithUser(ctx, "default"), "helm", "--manager-namespace", s.ManagerNamespace(), "upgrade",
+		"--set", "logLevel=debug,agent.logLevel=debug,client.logLevels.userDaemon=trace",
+		"--set", fmt.Sprintf("managerRbac.namespaces={%s,%s}", s.ManagerNamespace(), s.AppNamespace()),
+		"-f", filepath.Join("testdata", "namespaced-values.yaml"),
+	)
 	defer s.rollbackTM()
 	ctx = itest.WithConfig(ctx, func(cfg *client.Config) {
 		cfg.LogLevels.UserDaemon = logrus.InfoLevel

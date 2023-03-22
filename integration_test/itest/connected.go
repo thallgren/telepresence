@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,17 +25,25 @@ func WithConnection(np NamespacePair, f func(ctx context.Context, ch NamespacePa
 
 func (ch *connected) setup(ctx context.Context) bool {
 	t := getT(ctx)
-	_, _, _ = Telepresence(ctx, "quit", "-s") //nolint:dogsled // don't care about any of the returns
-	// Start once with default user to ensure that the auto-installer can run OK.
-	TelepresenceOk(WithUser(ctx, "default"), "helm", "install", "--set", "logLevel=debug", "--set", "agent.logLevel=debug")
-	stdout := TelepresenceOk(WithUser(ctx, "default"), "connect")
-	require.Contains(t, stdout, "Connected to context default")
-	TelepresenceQuitOk(ctx)
+	TelepresenceQuitOk(ctx) //nolint:dogsled
+	err := ch.TelepresenceHelmInstall(ctx, false, nil, []string{TestUser}, ch.ManagerNamespace(), ch.AppNamespace())
+	assert.NoError(t, err)
+	if t.Failed() {
+		return false
+	}
 
 	// Connect using telepresence-test-developer user
-	stdout = TelepresenceOk(ctx, "connect")
-	require.Contains(t, stdout, "Connected to context default")
-	TelepresenceOk(ctx, "loglevel", "-d30m", "debug")
+	stdout, _, err := Telepresence(ctx, "connect")
+	assert.NoError(t, err)
+	assert.Contains(t, stdout, "Connected to context default")
+	if t.Failed() {
+		return false
+	}
+	stdout, _, err = Telepresence(ctx, "loglevel", "-d30m", "debug")
+	assert.NoError(t, err)
+	if t.Failed() {
+		return false
+	}
 	ch.CapturePodLogs(ctx, "app=traffic-manager", "", ch.ManagerNamespace())
 	return true
 }

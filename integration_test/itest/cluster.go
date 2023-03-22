@@ -22,10 +22,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 	core "k8s.io/api/core/v1"
+	rbac "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
+	sigsYaml "sigs.k8s.io/yaml"
 
 	"github.com/datawire/dlib/dcontext"
 	"github.com/datawire/dlib/dexec"
@@ -69,6 +71,7 @@ type Cluster interface {
 	PackageHelmChart(ctx context.Context) (string, error)
 	GetValuesForHelm(values map[string]string, release bool, managerNamespace string, appNamespaces ...string) []string
 	GetK8SCluster(ctx context.Context, context, managerNamespace string) (context.Context, *k8s.Cluster, error)
+	TelepresenceHelmInstall(ctx context.Context, upgrade bool, values map[string]string, subjects []string, managerNamespace string, appNamespaces ...string) error
 }
 
 // The cluster is created once and then reused by all tests. It ensures that:
@@ -154,7 +157,7 @@ func WithCluster(ctx context.Context, f func(ctx context.Context)) {
 	_ = Run(ctx, "kubectl", "delete", "ns", "-l", "purpose=tp-cli-testing")
 	defer s.tearDown(ctx)
 	if !t.Failed() {
-		f(WithUser(s.withBasicConfig(ctx, t), TestUser))
+		f(s.withBasicConfig(ctx, t))
 	}
 }
 
@@ -257,12 +260,9 @@ func (s *cluster) ensureCluster(ctx context.Context, wg *sync.WaitGroup) {
 	require.NoError(t, os.Chmod(s.kubeConfig, 0o600), "failed to chmod 0600 %q", s.kubeConfig)
 
 	// Delete any lingering traffic-manager resources that aren't bound to specific namespaces.
-	_ = Run(ctx, "kubectl", "delete", "mutatingwebhookconfiguration,clusterrole,clusterrolebinding", "-l", "app=traffic-manager")
+	_ = Run(ctx, "kubectl", "delete", "mutatingwebhookconfiguration,role,rolebinding", "-l", "app=traffic-manager")
 
 	ctx = WithWorkingDir(ctx, filepath.Join(GetOSSRoot(ctx), "integration_test"))
-	require.NoError(t, Run(ctx, "kubectl", "apply", "-f", filepath.Join("testdata", "k8s", "client_rbac.yaml")),
-		"failed to create %s service account", TestUser)
-	require.NoError(t, Run(ctx, "kubectl", "label", "serviceaccount,clusterrole,clusterrolebinding", TestUser, "purpose="+purposeLabel))
 }
 
 // PodCreateTimeout will return a timeout suitable for operations that create pods.
@@ -544,6 +544,86 @@ func (s *cluster) installChart(ctx context.Context, release bool, chartFilename 
 	return err
 }
 
+func (s *cluster) TelepresenceHelmInstall(
+	ctx context.Context,
+	upgrade bool,
+	values map[string]string,
+	subjectNames []string,
+	managerNamespace string,
+	appNamespaces ...string) error {
+	settings := []string{
+		"--set", "logLevel=debug",
+		"--set", fmt.Sprintf("image.registry=%s", s.Registry()),
+		"--set", fmt.Sprintf("agentInjector.agentImage.registry=%s", s.AgentRegistry()),
+		// We don't want the tests or telepresence to depend on an extension host resolving, so we set it to localhost.
+		"--set", "systemaHost=,systemaPort=0",
+	}
+
+	for k, v := range values {
+		settings = append(settings, "--set", k+"="+v)
+	}
+
+	subjects := make([]rbac.Subject, len(subjectNames))
+	for i, s := range subjectNames {
+		subjects[i] = rbac.Subject{
+			Kind:      "ServiceAccount",
+			Name:      s,
+			Namespace: managerNamespace,
+		}
+	}
+
+	type xRbac struct {
+		Create     bool           `json:"create"`
+		Namespaced bool           `json:"namespaced"`
+		Subjects   []rbac.Subject `json:"subjects,omitempty"`
+		Namespaces []string       `json:"namespaces,omitempty"`
+	}
+	vx := struct {
+		ClientRbac  xRbac `json:"clientRbac"`
+		ManagerRbac xRbac `json:"managerRbac"`
+	}{
+		ClientRbac: xRbac{
+			Create:     true,
+			Namespaced: true,
+			Subjects:   subjects,
+			Namespaces: append(appNamespaces, managerNamespace),
+		},
+		ManagerRbac: xRbac{
+			Create:     true,
+			Namespaced: true,
+			Namespaces: append(appNamespaces, managerNamespace),
+		},
+	}
+	ss, err := sigsYaml.Marshal(&vx)
+	if err != nil {
+		return err
+	}
+	valuesFile := filepath.Join(getT(ctx).TempDir(), "values.yaml")
+	if err := os.WriteFile(valuesFile, ss, 0o644); err != nil {
+		return err
+	}
+	dlog.Info(ctx, string(ss))
+
+	ctx = WithWorkingDir(ctx, filepath.Join(GetOSSRoot(ctx), "integration_test"))
+	verb := "install"
+	if upgrade {
+		verb = "upgrade"
+	}
+	args := []string{"helm", verb, "-n", managerNamespace,
+		"-f", valuesFile,
+	}
+	args = append(args, settings...)
+
+	if _, _, err = Telepresence(WithUser(ctx, "default"), args...); err != nil {
+		return err
+	}
+	if err = RolloutStatusWait(ctx, managerNamespace, "deploy/traffic-manager"); err != nil {
+		return err
+	}
+	s.CapturePodLogs(ctx, "app=traffic-manager", "", managerNamespace)
+	return nil
+}
+
 func (s *cluster) pullHelmChart(ctx context.Context, version string) (string, error) {
 	if err := Run(ctx, "helm", "repo", "add", "datawire", "https://app.getambassador.io"); err != nil {
 		return "", err
@@ -560,9 +640,8 @@ func (s *cluster) pullHelmChart(ctx context.Context, version string) (string, er
 
 func (s *cluster) UninstallTrafficManager(ctx context.Context, managerNamespace string) {
 	t := getT(ctx)
-	ctx = WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": managerNamespace})
 	ctx = WithUser(ctx, "default")
-	TelepresenceOk(ctx, "helm", "uninstall")
+	TelepresenceOk(ctx, "helm", "uninstall", "--manager-namespace", managerNamespace)
 
 	// Helm uninstall does deletions asynchronously, so let's wait until the deployment is gone
 	assert.Eventually(t, func() bool { return len(RunningPods(ctx, "traffic-manager", managerNamespace)) == 0 },
@@ -657,7 +736,7 @@ func TelepresenceCmd(ctx context.Context, args ...string) *dexec.Cmd {
 		if user := GetUser(ctx); user != "default" {
 			na := make([]string, len(args)+2)
 			na[0] = "--as"
-			na[1] = "system:serviceaccount:default:" + user
+			na[1] = "system:serviceaccount:" + user
 			copy(na[2:], args)
 			args = na
 		}
@@ -775,7 +854,7 @@ func ApplyService(ctx context.Context, name, namespace, image string, port, targ
 }
 
 func DeleteSvcAndWorkload(ctx context.Context, workload, name, namespace string) {
-	require.NoError(getT(ctx), Kubectl(ctx, namespace, "delete", "--ignore-not-found", "--grace-period", "3", "svc,"+workload, name),
+	assert.NoError(getT(ctx), Kubectl(ctx, namespace, "delete", "--ignore-not-found", "--grace-period", "3", "svc,"+workload, name),
 		"failed to delete service and %s %s", workload, name)
 }
 

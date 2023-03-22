@@ -49,7 +49,7 @@ func (s *notConnectedSuite) Test_AgentImageFromConfig() {
 	// Restore the traffic-manager at the end of this function
 	ctx := itest.WithUser(s.Context(), "default")
 	defer func() {
-		itest.TelepresenceOk(ctx, "helm", "install")
+		s.TelepresenceHelmInstall(ctx, false, nil, []string{itest.TestUser}, s.ManagerNamespace(), s.AppNamespace())
 		itest.TelepresenceOk(ctx, "connect")
 		itest.TelepresenceDisconnectOk(ctx)
 	}()
@@ -60,13 +60,15 @@ func (s *notConnectedSuite) Test_AgentImageFromConfig() {
 		cfg.Images.PrivateAgentImage = "imageFromConfig:0.0.1"
 	})
 
+	require := s.Require()
+
 	// Remove the traffic-manager since we are altering config that applies to
 	// creating the traffic-manager
 	uninstallEverything := func() {
-		stdout := itest.TelepresenceOk(ctx, "helm", "uninstall")
+		stdout := itest.TelepresenceOk(ctx, "helm", "uninstall", "--manager-namespace", s.ManagerNamespace())
 		s.Contains(stdout, "Traffic Manager uninstalled successfully")
 		itest.TelepresenceQuitOk(ctx)
-		s.Require().Eventually(
+		require.Eventually(
 			func() bool {
 				stdout, _ := itest.KubectlOut(ctx, s.ManagerNamespace(),
 					"get", "svc,deploy", "traffic-manager", "--ignore-not-found")
@@ -79,8 +81,8 @@ func (s *notConnectedSuite) Test_AgentImageFromConfig() {
 	uninstallEverything()
 
 	// And reinstall it
-	itest.TelepresenceOk(ctxAI, "helm", "install")
-	itest.TelepresenceOk(ctxAI, "connect")
+	s.TelepresenceHelmInstall(ctxAI, false, nil, []string{itest.TestUser}, s.AppNamespace())
+	itest.TelepresenceOk(ctx, "connect")
 
 	// When this function ends we uninstall the manager
 	defer func() {
@@ -94,7 +96,6 @@ func (s *notConnectedSuite) Test_AgentImageFromConfig() {
 		"-o",
 		"jsonpath={.spec.template.spec.containers[0].env[?(@.name=='AGENT_IMAGE')].value}")
 
-	require := s.Require()
 	require.NoError(err)
 	actualRegistry, err := itest.KubectlOut(ctx, s.ManagerNamespace(),
 		"get", "deploy", "traffic-manager",

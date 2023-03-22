@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,6 +39,7 @@ func WithNamespacePair(ctx context.Context, suffix string, f func(NamespacePair)
 	getT(ctx).Run(fmt.Sprintf("Test_Namespaces_%s", suffix), func(t *testing.T) {
 		ctx = withT(ctx, t)
 		ctx = WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": s.managerNamespace})
+		ctx = WithUser(ctx, s.managerNamespace+":"+TestUser)
 		s.Harness = NewContextHarness(ctx)
 		s.PushHarness(ctx, s.setup, s.tearDown)
 		defer s.PopHarness()
@@ -49,10 +51,15 @@ const purposeLabel = "tp-cli-testing"
 
 func (s *nsPair) setup(ctx context.Context) bool {
 	CreateNamespaces(ctx, s.namespace, s.managerNamespace)
-	ctx = WithWorkingDir(ctx, filepath.Join(GetOSSRoot(ctx), "integration_test"))
-	err := Run(ctx, "kubectl", "apply", "-n", s.managerNamespace, "-f", filepath.Join("testdata", "k8s", "client_connect_rbac.yaml"))
-	require.NoError(getT(ctx), err, "failed to create connect Role/RoleBinding", TestUser)
-	return true
+	t := getT(ctx)
+	if t.Failed() {
+		return false
+	}
+	ctx = WithWorkingDir(ctx, filepath.Join(GetOSSRoot(ctx), "integration_test", "testdata", "k8s"))
+
+	err := Kubectl(ctx, s.managerNamespace, "apply", "-f", "client_sa.yaml")
+	assert.NoError(t, err, "failed to create connect ServiceAccount")
+	return !t.Failed()
 }
 
 func AppAndMgrNSName(suffix string) (appNS, mgrNS string) {

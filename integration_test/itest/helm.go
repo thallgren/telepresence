@@ -33,7 +33,7 @@ func (h *helmAndService) setup(ctx context.Context) bool {
 	TelepresenceQuitOk(ctx)
 
 	// Destroy the telepresence-test-developer binding so that we actually test the RBAC set up in the helm chart
-	require.NoError(t, Kubectl(ctx, "", "delete", "clusterrolebinding", "telepresence-test-developer"))
+	require.NoError(t, Kubectl(ctx, "", "delete", "rolebinding", "telepresence-test-developer"))
 	require.NoError(t, h.InstallTrafficManager(ctx, nil, h.ManagerNamespace(), h.AppNamespace()))
 
 	stdout := TelepresenceOk(ctx, "connect")
@@ -57,5 +57,5 @@ func (h *helmAndService) tearDown(ctx context.Context) {
 	// Restore the rbac we blew up in the setup
 	ctx = WithWorkingDir(ctx, filepath.Join(GetOSSRoot(ctx), "integration_test"))
 	require.NoError(t, Kubectl(ctx, "", "apply", "-f", filepath.Join("testdata", "k8s", "client_rbac.yaml")))
-	require.NoError(t, Run(ctx, "kubectl", "label", "clusterrolebinding", TestUser, "purpose="+purposeLabel))
+	require.NoError(t, Run(ctx, "kubectl", "label", "rolebinding", TestUser, "purpose="+purposeLabel))
 }

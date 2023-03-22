@@ -100,8 +100,19 @@ func (s *multipleInterceptsSuite) TestGatherLogs_NoK8sLogs() {
 func (s *singleServiceSuite) TestGatherLogs_OnlyMappedLogs() {
 	require := s.Require()
 	ctx := s.Context()
+	itest.TelepresenceDisconnectOk(ctx)
+
 	otherNS := fmt.Sprintf("other-ns-%s", s.Suffix())
 	itest.CreateNamespaces(ctx, otherNS)
+
+	err := s.TelepresenceHelmInstall(ctx, true, nil, []string{itest.TestUser}, s.ManagerNamespace(), s.AppNamespace(), otherNS)
+	require.NoError(err)
+	defer func() {
+		require.NoError(itest.Run(ctx, "helm", "rollback", "--wait", "--namespace", s.ManagerNamespace(), "traffic-manager"))
+	}()
+
+	itest.TelepresenceOk(ctx, "connect", "--mapped-namespaces", fmt.Sprintf("%s,%s", s.AppNamespace(), otherNS))
+
 	defer itest.DeleteNamespaces(ctx, otherNS)
 	itest.ApplyEchoService(ctx, s.ServiceName(), otherNS, 8083)
 	itest.TelepresenceOk(ctx, "intercept", "--namespace", otherNS, "--mount", "false", s.ServiceName())

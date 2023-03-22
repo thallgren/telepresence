@@ -153,7 +153,6 @@ func (s *notConnectedSuite) Test_ConflictingProxies() {
 		},
 	} {
 		s.Run(name, func() {
-			require := s.Require()
 			ctx := itest.WithKubeConfigExtension(s.Context(), func(cluster *api.Cluster) map[string]any {
 				return map[string]any{
 					"never-proxy": t.neverProxy,
@@ -163,23 +162,24 @@ func (s *notConnectedSuite) Test_ConflictingProxies() {
 			itest.TelepresenceOk(ctx, "connect", "--context", "extra")
 			defer itest.TelepresenceQuitOk(ctx)
 			s.Eventually(func() bool {
-				return itest.Run(ctx, "curl", "--silent", "-k", "--max-time", "0.5", "https://kubernetes.default:443") == nil
-			}, 15*time.Second, 2*time.Second, "cluster is not connected")
-			newRoute, err := routing.GetRoute(ctx, testIP)
-			if t.expectEq {
-				if originalRoute.Interface != nil {
-					require.NotNil(newRoute.Interface)
-					require.Equal(originalRoute.Interface.Name, newRoute.Interface.Name)
-				} else {
-					require.Nil(newRoute.Interface)
+				newRoute, err := routing.GetRoute(ctx, testIP)
+				if err != nil {
+					return false
 				}
-			} else {
-				require.NoError(err)
-				require.NotNil(newRoute.Interface)
-				if originalRoute.Interface != nil {
-					require.NotEqual(newRoute.Interface.Name, originalRoute.Interface.Name, "Expected %s not to equal %s", newRoute.Interface.Name, originalRoute.Interface.Name)
+				if t.expectEq {
+					if originalRoute.Interface != nil {
+						return newRoute.Interface != nil && originalRoute.Interface.Name == newRoute.Interface.Name
+					}
+					return newRoute.Interface == nil
 				}
-			}
+				if newRoute.Interface == nil {
+					return false
+				}
+				if originalRoute.Interface == nil {
+					return true
+				}
+				return newRoute.Interface.Name != originalRoute.Interface.Name
+			}, 5*time.Second, 200*time.Millisecond)
 		})
 	}
 }

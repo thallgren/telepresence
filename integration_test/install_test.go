@@ -76,7 +76,7 @@ func (is *installSuite) Test_NonHelmInstall() {
 		// Sometimes the traffic-agents configmap gets wiped, causing the delete command to fail, hence we don't require.NoError
 		_ = cmd.Run()
 	}()
-	stdout := itest.TelepresenceOk(ctx, "connect")
+	stdout := itest.TelepresenceOk(itest.WithUser(ctx, "default"), "connect")
 	is.Contains(stdout, "Connected to context")
 	defer itest.TelepresenceQuitOk(ctx)
 }

@@ -11,6 +11,7 @@ import (
 
 func (s *notConnectedSuite) Test_Uninstall() {
 	require := s.Require()
+	// The telepresence-test-developer will not be able to uninstall everything
 	ctx := itest.WithUser(s.Context(), "default")
 	itest.TelepresenceOk(ctx, "connect")
 
@@ -37,9 +38,10 @@ func (s *notConnectedSuite) Test_Uninstall() {
 		return strings.Contains(stdout, jobname+": ready to intercept (traffic-agent already installed)")
 	}, 30*time.Second, 3*time.Second)
 
-	// The telepresence-test-developer will not be able to uninstall everything
-	stdout = itest.TelepresenceOk(ctx, "helm", "uninstall")
-	defer s.installTelepresence(ctx)
+	stdout = itest.TelepresenceOk(ctx, "helm", "uninstall", "-n", s.ManagerNamespace())
+	defer func() {
+		require.NoError(s.InstallTrafficManager(ctx, nil, s.ManagerNamespace(), s.AppNamespace()))
+	}()
 	s.Contains(stdout, "Traffic Manager uninstalled successfully")
 
 	// Double check webhook agent is uninstalled

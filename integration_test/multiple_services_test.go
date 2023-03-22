@@ -100,8 +100,14 @@ func (s *multipleServicesSuite) Test_List() {
 }
 
 func (s *multipleServicesSuite) Test_ListOnlyMapped() {
-	ctx := s.Context()
+	ctx := itest.WithUser(s.Context(), "default")
 	require := s.Require()
+	itest.TelepresenceDisconnectOk(ctx)
+	defer func() {
+		ctx := s.Context()
+		itest.TelepresenceDisconnectOk(ctx)
+		itest.TelepresenceOk(s.Context(), "connect")
+	}()
 	stdout := itest.TelepresenceOk(ctx, "connect", "--mapped-namespaces", "default")
 	require.Empty(stdout)
 
