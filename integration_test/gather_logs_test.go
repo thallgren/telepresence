@@ -104,17 +104,18 @@ func (s *singleServiceSuite) TestGatherLogs_OnlyMappedLogs() {
 
 	otherNS := fmt.Sprintf("other-ns-%s", s.Suffix())
 	itest.CreateNamespaces(ctx, otherNS)
-
-	err := s.TelepresenceHelmInstall(ctx, true, nil, []string{itest.TestUser}, s.ManagerNamespace(), s.AppNamespace(), otherNS)
-	require.NoError(err)
-	defer func() {
-		require.NoError(itest.Run(ctx, "helm", "rollback", "--wait", "--namespace", s.ManagerNamespace(), "traffic-manager"))
-	}()
-
-	itest.TelepresenceOk(ctx, "connect", "--mapped-namespaces", fmt.Sprintf("%s,%s", s.AppNamespace(), otherNS))
-
 	defer itest.DeleteNamespaces(ctx, otherNS)
+
+	require.NoError(s.TelepresenceHelmInstall(itest.WithNamespaces(ctx, &itest.Namespaces{
+		Namespace:         s.ManagerNamespace(),
+		ManagedNamespaces: []string{s.AppNamespace(), otherNS},
+	}), true, nil))
+	defer s.RollbackTM(ctx)
+
+	itest.TelepresenceDisconnectOk(ctx)
 	itest.ApplyEchoService(ctx, s.ServiceName(), otherNS, 8083)
+
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 	itest.TelepresenceOk(ctx, "intercept", "--namespace", otherNS, "--mount", "false", s.ServiceName())
 	s.Eventually(
 		func() bool {
@@ -146,11 +147,11 @@ func (s *singleServiceSuite) TestGatherLogs_OnlyMappedLogs() {
 
 	// Connect using mapped-namespaces
 	itest.TelepresenceDisconnectOk(ctx)
-	stdout := itest.TelepresenceOk(ctx, "connect", "--mapped-namespaces", s.AppNamespace())
+	stdout := itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace(), "--mapped-namespaces", s.AppNamespace())
 	require.Contains(stdout, "Connected to context default")
 	defer func() {
 		itest.TelepresenceQuitOk(ctx)
-		stdout := itest.TelepresenceOk(ctx, "connect")
+		stdout := itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 		require.Contains(stdout, "Connected to context default")
 	}()
 

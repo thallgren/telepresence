@@ -23,7 +23,7 @@ import (
 // the DNS-resolver in the root daemon each time an update arrives.
 //
 // The first update will close the firstSnapshotArrived channel.
-func (kc *Cluster) startNamespaceWatcher(ctx context.Context) {
+func (kc *Cluster) StartNamespaceWatcher(ctx context.Context) {
 	kc.namespaceWatcherSnapshot = make(map[string]struct{})
 	nsSynced := make(chan struct{})
 	go func() {
@@ -107,9 +107,9 @@ func (kc *Cluster) canI(ctx context.Context, ra *auth.ResourceAttributes) (bool,
 	return false, err
 }
 
-// canWatchNamespaces answers the question if this client has the RBAC permissions necessary
+// CanWatchNamespaces answers the question if this client has the RBAC permissions necessary
 // to watch namespaces. The answer is likely false when using a namespaces scoped installation.
-func (kc *Cluster) canWatchNamespaces(ctx context.Context) bool {
+func (kc *Cluster) CanWatchNamespaces(ctx context.Context) bool {
 	ok, err := kc.canI(ctx, &auth.ResourceAttributes{
 		Verb:     "watch",
 		Resource: "namespaces",
@@ -192,19 +192,14 @@ func sortedStringSlicesEqual(as, bs []string) bool {
 	return true
 }
 
-func (kc *Cluster) SetMappedNamespaces(c context.Context, namespaces []string) (changed bool, err error) {
-	if len(namespaces) == 1 && namespaces[0] == "all" {
-		namespaces = nil
-	} else {
-		sort.Strings(namespaces)
-	}
-
+func (kc *Cluster) SetMappedNamespaces(c context.Context, namespaces []string) bool {
+	sort.Strings(namespaces)
 	if !sortedStringSlicesEqual(namespaces, kc.MappedNamespaces) {
 		kc.MappedNamespaces = namespaces
 		kc.refreshNamespaces(c)
-		changed = true
+		return true
 	}
-	return changed, err
+	return false
 }
 
 func (kc *Cluster) AddNamespaceListener(c context.Context, nsListener userd.NamespaceListener) {

@@ -2,17 +2,14 @@ package integration_test
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/datawire/dlib/dlog"
@@ -20,14 +17,6 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/filelocation"
 )
-
-func (s *notConnectedSuite) rollbackTM() {
-	require := s.Require()
-	ctx := s.Context()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	require.NoError(itest.Run(ctx, "helm", "rollback", "--wait", "--namespace", s.ManagerNamespace(), "traffic-manager"))
-}
 
 func (s *notConnectedSuite) Test_CloudNeverProxy() {
 	require := s.Require()
@@ -53,32 +42,12 @@ func (s *notConnectedSuite) Test_CloudNeverProxy() {
 	ips, err := getClusterIPs(cluster)
 	require.NoError(err)
 
-	tmpdir := s.T().TempDir()
-	values := path.Join(tmpdir, "values.yaml")
-	f, err := os.Create(values)
-	require.NoError(err)
-	b, err := yaml.Marshal(
-		map[string]map[string]map[string][]string{
-			"client": {
-				"routing": {
-					"neverProxySubnets": {fmt.Sprintf("%s/32", ip)},
-				},
-			},
-		},
-	)
-	require.NoError(err)
-	_, err = f.Write(b)
-	require.NoError(err)
-	itest.TelepresenceOk(itest.WithUser(ctx, "default"), "helm", "--manager-namespace", s.ManagerNamespace(), "upgrade",
-		"--set", "logLevel=debug,agent.logLevel=debug",
-		"--set", fmt.Sprintf("managerRbac.namespaces={%s,%s}", s.ManagerNamespace(), s.AppNamespace()),
-		"-f", filepath.Join("testdata", "namespaced-values.yaml"),
-		"-f", values,
-	)
-	defer s.rollbackTM()
+	values := map[string]string{"client.routing.neverProxySubnets": fmt.Sprintf("{%s/32}", ip)}
+	require.NoError(s.TelepresenceHelmInstall(ctx, true, values))
+	defer s.RollbackTM(ctx)
 
 	s.Eventually(func() bool {
-		itest.TelepresenceOk(ctx, "connect")
+		itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 		defer itest.TelepresenceQuitOk(ctx)
 
 		// The cluster's IP address will also be never proxied, so we gotta account for that.
@@ -126,22 +95,21 @@ func (s *notConnectedSuite) Test_RootdCloudLogLevel() {
 	}
 	rootLog.Close()
 
-	itest.TelepresenceOk(itest.WithUser(ctx, "default"), "helm", "--manager-namespace", s.ManagerNamespace(), "upgrade",
-		"--set", "logLevel=debug,agent.logLevel=debug,client.logLevels.rootDaemon=trace",
-		"--set", fmt.Sprintf("managerRbac.namespaces={%s,%s}", s.ManagerNamespace(), s.AppNamespace()),
-		"-f", filepath.Join("testdata", "namespaced-values.yaml"),
-	)
-	defer s.rollbackTM()
+	levels := map[string]string{
+		"logLevel":                    "debug",
+		"agent.logLevel":              "debug",
+		"client.logLevels.rootDaemon": "trace",
+	}
+	require.NoError(s.TelepresenceHelmInstall(ctx, true, levels))
+	defer s.RollbackTM(ctx)
 
 	ctx = itest.WithConfig(ctx, func(cfg *client.Config) {
 		cfg.LogLevels.RootDaemon = logrus.InfoLevel
 	})
 
-	itest.TelepresenceQuitOk(ctx) // Because context changed
-
 	var currentLine int64
 	s.Eventually(func() bool {
-		itest.TelepresenceOk(ctx, "connect")
+		itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 		itest.TelepresenceDisconnectOk(ctx)
 
 		rootLog, err := os.Open(rootLogName)
@@ -184,8 +152,7 @@ func (s *notConnectedSuite) Test_RootdCloudLogLevel() {
 	ctx = itest.WithConfig(ctx, func(config *client.Config) {
 		config.LogLevels.RootDaemon = logrus.DebugLevel
 	})
-	itest.TelepresenceQuitOk(ctx) // Because context changed
-	itest.TelepresenceOk(ctx, "connect")
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 	itest.TelepresenceDisconnectOk(ctx)
 	defer itest.TelepresenceQuitOk(ctx)
 	levelSet = false
@@ -195,6 +162,7 @@ func (s *notConnectedSuite) Test_RootdCloudLogLevel() {
 	require.False(levelSet, "Root log level not respected when set in config file")
 
 	var view client.SessionConfig
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 	jsonStdout := itest.TelepresenceOk(ctx, "config", "view", "--output", "json")
 	require.NoError(json.Unmarshal([]byte(jsonStdout), &view))
 	require.Equal(view.LogLevels.RootDaemon, logrus.DebugLevel)
@@ -220,20 +188,20 @@ func (s *notConnectedSuite) Test_UserdCloudLogLevel() {
 	}
 	logF.Close()
 
-	itest.TelepresenceOk(itest.WithUser(ctx, "default"), "helm", "--manager-namespace", s.ManagerNamespace(), "upgrade",
-		"--set", "logLevel=debug,agent.logLevel=debug,client.logLevels.userDaemon=trace",
-		"--set", fmt.Sprintf("managerRbac.namespaces={%s,%s}", s.ManagerNamespace(), s.AppNamespace()),
-		"-f", filepath.Join("testdata", "namespaced-values.yaml"),
-	)
-	defer s.rollbackTM()
+	levels := map[string]string{
+		"logLevel":                    "debug",
+		"agent.logLevel":              "debug",
+		"client.logLevels.userDaemon": "trace",
+	}
+	require.NoError(s.TelepresenceHelmInstall(ctx, true, levels))
+	defer s.RollbackTM(ctx)
 	ctx = itest.WithConfig(ctx, func(cfg *client.Config) {
 		cfg.LogLevels.UserDaemon = logrus.InfoLevel
 	})
-	itest.TelepresenceQuitOk(ctx) // Because context changed
 
 	var currentLine int64
 	s.Eventually(func() bool {
-		itest.TelepresenceOk(ctx, "connect")
+		itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 		itest.TelepresenceDisconnectOk(ctx)
 
 		logF, err := os.Open(logName)
@@ -276,9 +244,8 @@ func (s *notConnectedSuite) Test_UserdCloudLogLevel() {
 	ctx = itest.WithConfig(ctx, func(config *client.Config) {
 		config.LogLevels.UserDaemon = logrus.DebugLevel
 	})
-	itest.TelepresenceQuitOk(ctx) // Because context changed
 
-	itest.TelepresenceOk(ctx, "connect")
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 	itest.TelepresenceDisconnectOk(ctx)
 
 	defer itest.TelepresenceQuitOk(ctx)

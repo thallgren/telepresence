@@ -104,7 +104,7 @@ func (s *notConnectedSuite) Test_NeverProxy() {
 		require.NoError(err)
 		return map[string]any{"never-proxy": []string{ip + "/32"}}
 	})
-	itest.TelepresenceOk(ctx, "connect", "--context", "extra")
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace(), "--context", "extra")
 	defer itest.TelepresenceQuitOk(ctx)
 
 	// The cluster's IP address will also be never proxied, so we gotta account for that.
@@ -159,7 +159,7 @@ func (s *notConnectedSuite) Test_ConflictingProxies() {
 					"also-proxy":  t.alsoProxy,
 				}
 			})
-			itest.TelepresenceOk(ctx, "connect", "--context", "extra")
+			itest.TelepresenceOk(ctx, "connect", "--context", "extra", "--manager-namespace", s.ManagerNamespace())
 			defer itest.TelepresenceQuitOk(ctx)
 			s.Eventually(func() bool {
 				newRoute, err := routing.GetRoute(ctx, testIP)
@@ -200,7 +200,7 @@ func (s *notConnectedSuite) Test_DNSIncludes() {
 	stdout := itest.TelepresenceOk(ctx, "config", "--context", "extra", "view", "--client-only")
 	require.Contains(stdout, "    includeSuffixes:\n        - .org")
 
-	itest.TelepresenceOk(ctx, "connect", "--context", "extra")
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace(), "--context", "extra")
 	defer itest.TelepresenceQuitOk(ctx)
 
 	retryCount := 0

@@ -46,51 +46,17 @@ func (s *webhookSuite) Test_AutoInjectedAgent() {
 }
 
 func (s *notConnectedSuite) Test_AgentImageFromConfig() {
-	// Restore the traffic-manager at the end of this function
-	ctx := itest.WithUser(s.Context(), "default")
-	defer func() {
-		s.TelepresenceHelmInstall(ctx, false, nil, []string{itest.TestUser}, s.ManagerNamespace(), s.AppNamespace())
-		itest.TelepresenceOk(ctx, "connect")
-		itest.TelepresenceDisconnectOk(ctx)
-	}()
-
 	// Use a config with agentImage to validate that it's the
 	// latter that is used in the traffic-manager
-	ctxAI := itest.WithConfig(ctx, func(cfg *client.Config) {
+	ctx := itest.WithConfig(s.Context(), func(cfg *client.Config) {
 		cfg.Images.PrivateAgentImage = "imageFromConfig:0.0.1"
 	})
 
 	require := s.Require()
+	require.NoError(s.TelepresenceHelmInstall(itest.WithAgentImage(ctx, nil), true, nil))
+	defer s.RollbackTM(ctx)
 
-	// Remove the traffic-manager since we are altering config that applies to
-	// creating the traffic-manager
-	uninstallEverything := func() {
-		stdout := itest.TelepresenceOk(ctx, "helm", "uninstall", "--manager-namespace", s.ManagerNamespace())
-		s.Contains(stdout, "Traffic Manager uninstalled successfully")
-		itest.TelepresenceQuitOk(ctx)
-		require.Eventually(
-			func() bool {
-				stdout, _ := itest.KubectlOut(ctx, s.ManagerNamespace(),
-					"get", "svc,deploy", "traffic-manager", "--ignore-not-found")
-				return stdout == ""
-			},
-			5*time.Second,        // waitFor
-			500*time.Millisecond, // polling interval
-		)
-	}
-	uninstallEverything()
-
-	// And reinstall it
-	s.TelepresenceHelmInstall(ctxAI, false, nil, []string{itest.TestUser}, s.AppNamespace())
-	itest.TelepresenceOk(ctx, "connect")
-
-	// When this function ends we uninstall the manager
-	defer func() {
-		uninstallEverything()
-	}()
-
-	image, err := itest.Output(ctx, "kubectl",
-		"--namespace", s.ManagerNamespace(),
+	image, err := itest.KubectlOut(ctx, s.ManagerNamespace(),
 		"get", "deploy", "traffic-manager",
 		"--ignore-not-found",
 		"-o",
@@ -105,5 +71,4 @@ func (s *notConnectedSuite) Test_AgentImageFromConfig() {
 	require.NoError(err)
 	s.Equal("imageFromConfig:0.0.1", image)
 	s.Equal(s.Registry(), actualRegistry)
-	s.CapturePodLogs(ctx, "app=traffic-manager", "", s.ManagerNamespace())
 }

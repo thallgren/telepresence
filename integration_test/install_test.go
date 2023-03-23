@@ -39,16 +39,9 @@ type installSuite struct {
 }
 
 func init() {
-	itest.AddNamespacePairSuite("-auto-install", func(h itest.NamespacePair) suite.TestingSuite {
+	itest.AddNamespacePairSuite("-install", func(h itest.NamespacePair) suite.TestingSuite {
 		return &installSuite{Suite: itest.Suite{Harness: h}, NamespacePair: h}
 	})
-}
-
-func (is *installSuite) SetupSuite() {
-	is.Suite.SetupSuite()
-	ctx := is.Context()
-	itest.TelepresenceQuitOk(ctx)
-	_ = itest.Run(ctx, "helm", "uninstall", "traffic-manager", "--namespace", is.ManagerNamespace())
 }
 
 func (is *installSuite) Test_NonHelmInstall() {
@@ -57,7 +50,7 @@ func (is *installSuite) Test_NonHelmInstall() {
 
 	chart, err := is.PackageHelmChart(ctx)
 	require.NoError(err)
-	values := is.GetValuesForHelm(map[string]string{}, false, is.ManagerNamespace(), is.AppNamespace())
+	values := is.GetValuesForHelm(ctx, map[string]string{}, false)
 	values = append([]string{"template", "traffic-manager", chart, "-n", is.ManagerNamespace()}, values...)
 	manifest, err := itest.Output(ctx, "helm", values...)
 	require.NoError(err)
@@ -338,7 +331,6 @@ func (is *installSuite) Test_findTrafficManager_differentNamespace_present() {
 	itest.CreateNamespaces(ctx, customNamespace)
 	defer itest.DeleteNamespaces(ctx, customNamespace)
 	defer is.UninstallTrafficManager(ctx, customNamespace)
-	ctx = itest.WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": customNamespace})
 	ctx = itest.WithKubeConfigExtension(ctx, func(cluster *api.Cluster) map[string]any {
 		return map[string]any{"manager": map[string]string{"namespace": customNamespace}}
 	})

@@ -15,15 +15,20 @@ import (
 	"github.com/telepresenceio/telepresence/v2/integration_test/itest"
 )
 
-func (s *helmSuite) limitedRangeTest(origCtx context.Context, policy, limitedNS string) {
-	ctx := itest.WithEnv(origCtx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": limitedNS})
+func (s *helmSuite) limitedRangeTest(ctx context.Context, policy, limitedNS string) {
 	svc := s.ServiceName()
 	defer func() {
 		s.UninstallTrafficManager(ctx, limitedNS)
 		itest.TelepresenceOk(ctx, "quit", "-s")
 	}()
-	s.NoError(s.InstallTrafficManager(ctx, map[string]string{"agentInjector.webhook.reinvocationPolicy": policy}, limitedNS))
-	itest.TelepresenceOk(ctx, "connect")
+	ctx = itest.WithNamespaces(ctx, &itest.Namespaces{
+		Namespace:         limitedNS,
+		ManagedNamespaces: []string{limitedNS},
+	})
+	s.NoError(s.TelepresenceHelmInstall(ctx, true, map[string]string{"agentInjector.webhook.reinvocationPolicy": policy}))
+	itest.TelepresenceDisconnectOk(ctx)
+	ctx = itest.WithUser(ctx, limitedNS+":"+itest.TestUser)
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", limitedNS)
 	itest.TelepresenceOk(ctx, "loglevel", "debug")
 	s.CapturePodLogs(ctx, "app=traffic-manager", "", limitedNS)
 
@@ -73,7 +78,7 @@ func (s *helmSuite) TestLimitRange() {
 	ctx := s.Context()
 	itest.TelepresenceOk(ctx, "quit", "-s")
 	defer func() {
-		itest.TelepresenceOk(ctx, "connect")
+		itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 	}()
 
 	limitedNS := fmt.Sprintf("limited-ns-%s", s.Suffix())

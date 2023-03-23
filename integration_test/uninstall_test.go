@@ -13,7 +13,7 @@ func (s *notConnectedSuite) Test_Uninstall() {
 	require := s.Require()
 	// The telepresence-test-developer will not be able to uninstall everything
 	ctx := itest.WithUser(s.Context(), "default")
-	itest.TelepresenceOk(ctx, "connect")
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 
 	names := func() (string, error) {
 		return itest.KubectlOut(ctx, s.ManagerNamespace(),
@@ -25,7 +25,6 @@ func (s *notConnectedSuite) Test_Uninstall() {
 	stdout, err := names()
 	require.NoError(err)
 	require.Equal(2, len(strings.Split(stdout, " ")), "the string %q doesn't contain a service and a deployment", stdout)
-	s.CapturePodLogs(ctx, "app=traffic-manager", "", s.ManagerNamespace())
 
 	// Add webhook agent to test webhook uninstall
 	jobname := "echo-auto-inject"
@@ -40,7 +39,7 @@ func (s *notConnectedSuite) Test_Uninstall() {
 
 	stdout = itest.TelepresenceOk(ctx, "helm", "uninstall", "-n", s.ManagerNamespace())
 	defer func() {
-		require.NoError(s.InstallTrafficManager(ctx, nil, s.ManagerNamespace(), s.AppNamespace()))
+		require.NoError(s.InstallTrafficManager(ctx, nil))
 	}()
 	s.Contains(stdout, "Traffic Manager uninstalled successfully")
 

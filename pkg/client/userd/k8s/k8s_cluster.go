@@ -131,12 +131,6 @@ func NewCluster(c context.Context, kubeFlags *client.Kubeconfig, namespaces []st
 	}
 	c = k8sapi.WithK8sInterface(c, cs)
 
-	if len(namespaces) == 1 && namespaces[0] == "all" {
-		namespaces = nil
-	} else {
-		sort.Strings(namespaces)
-	}
-
 	ret := &Cluster{
 		Kubeconfig: kubeFlags,
 		ki:         cs,
@@ -152,17 +146,18 @@ func NewCluster(c context.Context, kubeFlags *client.Kubeconfig, namespaces []st
 	dlog.Infof(c, "Context: %s", ret.Context)
 	dlog.Infof(c, "Server: %s", ret.Server)
 
+	if len(namespaces) == 1 && namespaces[0] == "all" {
+		namespaces = nil
+	}
 	if len(namespaces) == 0 {
 		namespaces = cfg.Cluster.MappedNamespaces
 	}
 	if len(namespaces) == 0 {
-		if ret.canWatchNamespaces(c) {
-			ret.startNamespaceWatcher(c)
+		if ret.CanWatchNamespaces(c) {
+			ret.StartNamespaceWatcher(c)
 		}
 	} else {
-		if _, err = ret.SetMappedNamespaces(c, namespaces); err != nil {
-			return nil, err
-		}
+		ret.SetMappedNamespaces(c, namespaces)
 	}
 	if ret.GetManagerNamespace() == "" {
 		ret.KubeconfigExtension.Manager.Namespace, err = ret.determineTrafficManagerNamespace(c)

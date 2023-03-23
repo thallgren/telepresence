@@ -23,8 +23,9 @@ func init() {
 func (s *notConnectedSuite) SetupSuite() {
 	s.Suite.SetupSuite()
 	ctx := s.Context()
-	s.Require().NoError(s.InstallTrafficManager(ctx, nil, s.ManagerNamespace(), s.AppNamespace()))
-	stdout := itest.TelepresenceOk(ctx, "connect")
+	require := s.Require()
+	require.NoError(s.TelepresenceHelmInstall(ctx, false, nil))
+	stdout := itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 	s.Contains(stdout, "Connected to context")
 	s.CapturePodLogs(ctx, "app=traffic-manager", "", s.ManagerNamespace())
 	itest.TelepresenceDisconnectOk(ctx)
@@ -37,7 +38,7 @@ func (s *notConnectedSuite) TearDownSuite() {
 
 func (s *notConnectedSuite) Test_ConnectWithCommand() {
 	ctx := s.Context()
-	stdout := itest.TelepresenceOk(ctx, "connect", "--", s.Executable(), "status")
+	stdout := itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace(), "--", s.Executable(), "status")
 	s.Contains(stdout, "Connected to context")
 	s.Contains(stdout, "Kubernetes context:")
 	itest.TelepresenceDisconnectOk(ctx)
@@ -75,18 +76,22 @@ func (s *notConnectedSuite) Test_ConnectingToOtherNamespace() {
 	defer itest.DeleteNamespaces(ctx, appSpace2, mgrSpace2)
 
 	s.Run("Installs Successfully", func() {
-		ctx := itest.WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": mgrSpace2})
-		s.NoError(s.InstallTrafficManager(ctx, nil, mgrSpace2, appSpace2))
+		ctx := itest.WithNamespaces(s.Context(), &itest.Namespaces{
+			Namespace:         mgrSpace2,
+			ManagedNamespaces: []string{appSpace2},
+		})
+		s.NoError(s.TelepresenceHelmInstall(ctx, false, nil))
 	})
 
 	s.Run("Can be connected to with --manager-namespace-flag", func() {
+		ctx := s.Context()
 		itest.TelepresenceQuitOk(ctx)
-		ctx := itest.WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": ""})
 
 		// Set the config to some nonsense to verify that the flag wins
 		ctx = itest.WithConfig(ctx, func(cfg *client.Config) {
 			cfg.Cluster.DefaultManagerNamespace = "daffy-duck"
 		})
+		ctx = itest.WithUser(ctx, mgrSpace2+":"+itest.TestUser)
 		stdout := itest.TelepresenceOk(ctx, "connect", "--manager-namespace="+mgrSpace2)
 		s.Contains(stdout, "Connected to context")
 		stdout = itest.TelepresenceOk(ctx, "status")
@@ -94,20 +99,18 @@ func (s *notConnectedSuite) Test_ConnectingToOtherNamespace() {
 	})
 
 	s.Run("Can be connected to with defaultManagerNamespace config", func() {
+		ctx := s.Context()
 		itest.TelepresenceQuitOk(ctx)
-		ctx := itest.WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": ""})
-
 		ctx = itest.WithConfig(ctx, func(cfg *client.Config) {
 			cfg.Cluster.DefaultManagerNamespace = mgrSpace2
 		})
-		stdout := itest.TelepresenceOk(ctx, "connect")
+		stdout := itest.TelepresenceOk(itest.WithUser(ctx, "default"), "connect")
 		s.Contains(stdout, "Connected to context")
 		stdout = itest.TelepresenceOk(ctx, "status")
 		s.Regexp(`Manager namespace\s+: `+mgrSpace2, stdout)
 	})
 
 	s.Run("Uninstalls Successfully", func() {
-		ctx := itest.WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": mgrSpace2})
-		s.UninstallTrafficManager(ctx, mgrSpace2)
+		s.UninstallTrafficManager(s.Context(), mgrSpace2)
 	})
 }

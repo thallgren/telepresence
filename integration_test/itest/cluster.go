@@ -49,19 +49,17 @@ import (
 )
 
 const (
-	TestUser        = "telepresence-test-developer"
-	TestUserAccount = "system:serviceaccount:default:" + TestUser
+	TestUser = "telepresence-test-developer"
 )
 
 type Cluster interface {
-	AgentImageName() string
 	CapturePodLogs(ctx context.Context, app, container, ns string)
 	CompatVersion() string
 	Executable() string
 	GeneralError() error
 	GlobalEnv() map[string]string
-	InstallTrafficManager(ctx context.Context, values map[string]string, managerNamespace string, appNamespaces ...string) error
-	InstallTrafficManagerVersion(ctx context.Context, version string, values map[string]string, managerNamespace string, appNamespaces ...string) error
+	InstallTrafficManager(ctx context.Context, values map[string]string) error
+	InstallTrafficManagerVersion(ctx context.Context, version string, values map[string]string) error
 	IsCI() bool
 	Registry() string
 	SetGeneralError(error)
@@ -69,9 +67,9 @@ type Cluster interface {
 	TelepresenceVersion() string
 	UninstallTrafficManager(ctx context.Context, managerNamespace string)
 	PackageHelmChart(ctx context.Context) (string, error)
-	GetValuesForHelm(values map[string]string, release bool, managerNamespace string, appNamespaces ...string) []string
+	GetValuesForHelm(ctx context.Context, values map[string]string, release bool) []string
 	GetK8SCluster(ctx context.Context, context, managerNamespace string) (context.Context, *k8s.Cluster, error)
-	TelepresenceHelmInstall(ctx context.Context, upgrade bool, values map[string]string, subjects []string, managerNamespace string, appNamespaces ...string) error
+	TelepresenceHelmInstall(ctx context.Context, upgrade bool, values map[string]string) error
 }
 
 // The cluster is created once and then reused by all tests. It ensures that:
@@ -88,12 +86,9 @@ type cluster struct {
 	testVersion      string
 	compatVersion    string
 	registry         string
-	agentRegistry    string
 	kubeConfig       string
 	generalError     error
 	logCapturingPods sync.Map
-	agentImageName   string
-	agentImageTag    string
 }
 
 func WithCluster(ctx context.Context, f func(ctx context.Context)) {
@@ -118,18 +113,19 @@ func WithCluster(ctx context.Context, f func(ctx context.Context)) {
 	s.compatVersion = dos.Getenv(ctx, "DEV_COMPAT_VERSION")
 
 	t := getT(ctx)
-	s.agentImageName = "tel2"
-	s.agentImageTag = s.testVersion[1:]
+	var agentImage Image
+	agentImage.Name = "tel2"
+	agentImage.Tag = s.testVersion[1:]
 	if agentImageQN, ok := dos.LookupEnv(ctx, "DEV_AGENT_IMAGE"); ok {
 		i := strings.LastIndexByte(agentImageQN, '/')
 		if i >= 0 {
-			s.agentRegistry = agentImageQN[:i]
+			agentImage.Registry = agentImageQN[:i]
 			agentImageQN = agentImageQN[i+1:]
 		}
 		i = strings.IndexByte(agentImageQN, ':')
 		require.Greater(t, i, 0)
-		s.agentImageName = agentImageQN[:i]
-		s.agentImageTag = agentImageQN[i+1:]
+		agentImage.Name = agentImageQN[:i]
+		agentImage.Tag = agentImageQN[i+1:]
 	}
 
 	s.registry = dos.Getenv(ctx, "DTEST_REGISTRY")
@@ -150,9 +146,11 @@ func WithCluster(ctx context.Context, f func(ctx context.Context)) {
 	for err := range errs {
 		assert.NoError(t, err)
 	}
-	if s.agentRegistry == "" {
-		s.agentRegistry = s.registry
+	if agentImage.Registry == "" {
+		agentImage.Registry = s.registry
 	}
+	ctx = WithAgentImage(ctx, &agentImage)
+
 	s.ensureQuit(ctx)
 	_ = Run(ctx, "kubectl", "delete", "ns", "-l", "purpose=tp-cli-testing")
 	defer s.tearDown(ctx)
@@ -296,7 +294,11 @@ func (s *cluster) withBasicConfig(c context.Context, t *testing.T) context.Conte
 	to.PrivateTrafficManagerConnect = 180 * time.Second
 
 	config.Images.PrivateRegistry = s.Registry()
-	config.Images.PrivateWebhookRegistry = s.AgentRegistry()
+	if agentImage := GetAgentImage(c); agentImage != nil {
+		config.Images.PrivateWebhookRegistry = agentImage.Registry
+	} else {
+		config.Images.PrivateWebhookRegistry = s.Registry()
+	}
 
 	config.Grpc.MaxReceiveSize, _ = resource.ParseQuantity("10Mi")
 	config.Cloud.SystemaHost = "127.0.0.1"
@@ -316,10 +318,7 @@ func (s *cluster) withBasicConfig(c context.Context, t *testing.T) context.Conte
 
 func (s *cluster) GlobalEnv() map[string]string {
 	globalEnv := map[string]string{
-		"TELEPRESENCE_VERSION":     s.testVersion,
-		"TELEPRESENCE_AGENT_IMAGE": s.agentImageName + ":" + s.agentImageTag, // Prevent attempts to retrieve image from SystemA
-		"TELEPRESENCE_REGISTRY":    s.registry,
-		"KUBECONFIG":               s.kubeConfig,
+		"KUBECONFIG": s.kubeConfig,
 	}
 	yes := struct{}{}
 	includeEnv := map[string]struct{}{
@@ -371,10 +370,6 @@ func (s *cluster) IsCI() bool {
 	return s.isCI
 }
 
-func (s *cluster) AgentRegistry() string {
-	return s.agentRegistry
-}
-
 func (s *cluster) Registry() string {
 	return s.registry
 }
@@ -393,10 +388,6 @@ func (s *cluster) TelepresenceVersion() string {
 
 func (s *cluster) CompatVersion() string {
 	return s.compatVersion
-}
-
-func (s *cluster) AgentImageName() string {
-	return s.agentImageName
 }
 
 func (s *cluster) CapturePodLogs(ctx context.Context, app, container, ns string) {
@@ -474,21 +465,27 @@ func (s *cluster) PackageHelmChart(ctx context.Context) (string, error) {
 	return filename, nil
 }
 
-func (s *cluster) GetValuesForHelm(values map[string]string, release bool, managerNamespace string, appNamespaces ...string) []string {
+func (s *cluster) GetValuesForHelm(ctx context.Context, values map[string]string, release bool) []string {
+	nss := GetNamespaces(ctx)
 	settings := []string{
 		"--set", "logLevel=debug",
-		"--set", fmt.Sprintf("agentInjector.agentImage.name=%s", s.agentImageName), // Prevent attempts to retrieve image from SystemA
-		"--set", fmt.Sprintf("agentInjector.agentImage.tag=%s", s.agentImageTag),
-		"--set", fmt.Sprintf("clientRbac.namespaces={%s}", strings.Join(append(appNamespaces, managerNamespace), ",")),
-		"--set", fmt.Sprintf("managerRbac.namespaces={%s}", strings.Join(append(appNamespaces, managerNamespace), ",")),
+		"--set", fmt.Sprintf("clientRbac.namespaces=%s", nss.HelmString()),
+		"--set", fmt.Sprintf("managerRbac.namespaces=%s", nss.HelmString()),
 		// We don't want the tests or telepresence to depend on an extension host resolving, so we set it to localhost.
 		"--set", "systemaHost=127.0.0.1",
 	}
-	if !release {
+	agentImage := GetAgentImage(ctx)
+	if agentImage != nil {
 		settings = append(settings,
-			"--set", fmt.Sprintf("image.registry=%s", s.Registry()),
-			"--set", fmt.Sprintf("agentInjector.agentImage.registry=%s", s.AgentRegistry()),
+			"--set", fmt.Sprintf("agentInjector.agentImage.name=%s", agentImage.Name), // Prevent attempts to retrieve image from SystemA
+			"--set", fmt.Sprintf("agentInjector.agentImage.tag=%s", agentImage.Tag),
 		)
+	}
+	if !release {
+		settings = append(settings, "--set", fmt.Sprintf("image.registry=%s", s.Registry()))
+		if agentImage != nil {
+			settings = append(settings, "--set", fmt.Sprintf("agentInjector.agentImage.registry=%s", agentImage.Registry))
+		}
 	}
 
 	for k, v := range values {
@@ -497,12 +494,12 @@ func (s *cluster) GetValuesForHelm(values map[string]string, release bool, manag
 	return settings
 }
 
-func (s *cluster) InstallTrafficManager(ctx context.Context, values map[string]string, managerNamespace string, appNamespaces ...string) error {
+func (s *cluster) InstallTrafficManager(ctx context.Context, values map[string]string) error {
 	chartFilename, err := s.PackageHelmChart(ctx)
 	if err != nil {
 		return err
 	}
-	return s.installChart(ctx, false, chartFilename, values, managerNamespace, appNamespaces...)
+	return s.installChart(ctx, false, chartFilename, values)
 }
 
 // InstallTrafficManagerVersion performs a helm install of a specific version of the traffic-manager using
@@ -511,64 +508,48 @@ func (s *cluster) InstallTrafficManager(ctx context.Context, values map[string]s
 // configured using DEV_AGENT_IMAGE.
 //
 // The intent is to simulate connection to an older cluster from the current client.
-func (s *cluster) InstallTrafficManagerVersion(
-	ctx context.Context,
-	version string,
-	values map[string]string,
-	managerNamespace string,
-	appNamespaces ...string,
-) error {
+func (s *cluster) InstallTrafficManagerVersion(ctx context.Context, version string, values map[string]string) error {
 	chartFilename, err := s.pullHelmChart(ctx, version)
 	if err != nil {
 		return err
 	}
-	return s.installChart(ctx, true, chartFilename, values, managerNamespace, appNamespaces...)
+	return s.installChart(ctx, true, chartFilename, values)
 }
 
-func (s *cluster) installChart(ctx context.Context, release bool, chartFilename string, values map[string]string, managerNamespace string, appNamespaces ...string) error {
-	settings := s.GetValuesForHelm(values, release, managerNamespace, appNamespaces...)
+func (s *cluster) installChart(ctx context.Context, release bool, chartFilename string, values map[string]string) error {
+	settings := s.GetValuesForHelm(ctx, values, release)
 
 	ctx = WithWorkingDir(ctx, filepath.Join(GetOSSRoot(ctx), "integration_test"))
 	helmValues := filepath.Join("testdata", "namespaced-values.yaml")
-	args := []string{"install", "-n", managerNamespace, "-f", helmValues, "--wait"}
+	nss := GetNamespaces(ctx)
+	args := []string{"install", "-n", nss.Namespace, "-f", helmValues, "--wait"}
 	args = append(args, settings...)
 	args = append(args, "traffic-manager", chartFilename)
 
 	err := Run(ctx, "helm", args...)
 	if err == nil {
-		err = RolloutStatusWait(ctx, managerNamespace, "deploy/traffic-manager")
+		err = RolloutStatusWait(ctx, nss.Namespace, "deploy/traffic-manager")
 		if err == nil {
-			s.CapturePodLogs(ctx, "app=traffic-manager", "", managerNamespace)
+			s.CapturePodLogs(ctx, "app=traffic-manager", "", nss.Namespace)
 		}
 	}
 	return err
 }
 
-func (s *cluster) TelepresenceHelmInstall(
-	ctx context.Context,
-	upgrade bool,
-	values map[string]string,
-	subjectNames []string,
-	managerNamespace string,
-	appNamespaces ...string) error {
-	settings := []string{
-		"--set", "logLevel=debug",
-		"--set", fmt.Sprintf("image.registry=%s", s.Registry()),
-		"--set", fmt.Sprintf("agentInjector.agentImage.registry=%s", s.AgentRegistry()),
-		// We don't want the tests or telepresence to depend on an extension host resolving, so we set it to localhost.
-		"--set", "systemaHost=,systemaPort=0",
-	}
-
+func (s *cluster) TelepresenceHelmInstall(ctx context.Context, upgrade bool, values map[string]string) error {
+	settings := make([]string, 0, len(values)*2)
 	for k, v := range values {
 		settings = append(settings, "--set", k+"="+v)
 	}
 
+	nss := GetNamespaces(ctx)
+	subjectNames := []string{TestUser}
 	subjects := make([]rbac.Subject, len(subjectNames))
 	for i, s := range subjectNames {
 		subjects[i] = rbac.Subject{
 			Kind:      "ServiceAccount",
 			Name:      s,
-			Namespace: managerNamespace,
+			Namespace: nss.Namespace,
 		}
 	}
 
@@ -578,20 +559,36 @@ func (s *cluster) TelepresenceHelmInstall(
 		Subjects   []rbac.Subject `json:"subjects,omitempty"`
 		Namespaces []string       `json:"namespaces,omitempty"`
 	}
+	type xAgent struct {
+		Image *Image `json:"image,omitempty"`
+	}
+	var agent *xAgent
+	if agentImage := GetAgentImage(ctx); agentImage != nil {
+		agent = &xAgent{Image: agentImage}
+	}
+	nsl := nss.UniqueList()
 	vx := struct {
-		ClientRbac  xRbac `json:"clientRbac"`
-		ManagerRbac xRbac `json:"managerRbac"`
+		SystemaHost string  `json:"systemaHost"`
+		SystemaPort int     `json:"systemaPort"`
+		LogLevel    string  `json:"logLevel"`
+		Image       *Image  `json:"image,omitempty"`
+		Agent       *xAgent `json:"agent,omitempty"`
+		ClientRbac  xRbac   `json:"clientRbac"`
+		ManagerRbac xRbac   `json:"managerRbac"`
 	}{
+		LogLevel: "debug",
+		Image:    GetImage(ctx),
+		Agent:    agent,
 		ClientRbac: xRbac{
 			Create:     true,
-			Namespaced: true,
+			Namespaced: len(nss.ManagedNamespaces) > 0,
 			Subjects:   subjects,
-			Namespaces: append(appNamespaces, managerNamespace),
+			Namespaces: nsl,
 		},
 		ManagerRbac: xRbac{
 			Create:     true,
 			Namespaced: true,
-			Namespaces: append(appNamespaces, managerNamespace),
+			Namespaces: nsl,
 		},
 	}
 	ss, err := sigsYaml.Marshal(&vx)
@@ -602,14 +599,12 @@ func (s *cluster) TelepresenceHelmInstall(
 	if err := os.WriteFile(valuesFile, ss, 0o644); err != nil {
 		return err
 	}
-	dlog.Info(ctx, string(ss))
 
-	ctx = WithWorkingDir(ctx, filepath.Join(GetOSSRoot(ctx), "integration_test"))
 	verb := "install"
 	if upgrade {
 		verb = "upgrade"
 	}
-	args := []string{"helm", verb, "-n", managerNamespace,
+	args := []string{"helm", verb, "-n", nss.Namespace,
 		"-f", valuesFile,
 	}
 	args = append(args, settings...)
@@ -617,10 +612,10 @@ func (s *cluster) TelepresenceHelmInstall(
 	if _, _, err = Telepresence(WithUser(ctx, "default"), args...); err != nil {
 		return err
 	}
-	if err = RolloutStatusWait(ctx, managerNamespace, "deploy/traffic-manager"); err != nil {
+	if err = RolloutStatusWait(ctx, nss.Namespace, "deploy/traffic-manager"); err != nil {
 		return err
 	}
-	s.CapturePodLogs(ctx, "app=traffic-manager", "", managerNamespace)
+	s.CapturePodLogs(ctx, "app=traffic-manager", "", nss.Namespace)
 	return nil
 }
 
@@ -740,6 +735,9 @@ func TelepresenceCmd(ctx context.Context, args ...string) *dexec.Cmd {
 			copy(na[2:], args)
 			args = na
 		}
+	}
+	if UseDocker(ctx) {
+		args = append([]string{"--docker"}, args...)
 	}
 	cmd := Command(ctx, GetGlobalHarness(ctx).executable, args...)
 	cmd.Stdout = &stdout
@@ -985,6 +983,9 @@ func PingInterceptedEchoServer(ctx context.Context, svc, svcPort string) {
 }
 
 func WithConfig(c context.Context, modifierFunc func(config *client.Config)) context.Context {
+	// Quit a running daemon. We're changing the directory where its config resides.
+	TelepresenceQuitOk(c)
+
 	t := getT(c)
 	configCopy := *client.GetConfig(c)
 	modifierFunc(&configCopy)

@@ -589,7 +589,7 @@ func (s *session) ApplyConfig(ctx context.Context) error {
 	if len(s.MappedNamespaces) == 0 {
 		mns := client.GetConfig(ctx).Cluster.MappedNamespaces
 		if len(mns) > 0 {
-			_, err = s.SetMappedNamespaces(ctx, mns)
+			s.SetMappedNamespaces(ctx, mns)
 		}
 	}
 	return err
@@ -871,11 +871,18 @@ func (s *session) UpdateStatus(c context.Context, cr *rpc.ConnectRequest) *rpc.C
 		}
 	}
 
-	changed, err := s.SetMappedNamespaces(c, cr.MappedNamespaces)
-	if err != nil {
-		return connectError(rpc.ConnectInfo_CLUSTER_FAILED, err)
+	namespaces := cr.MappedNamespaces
+	if len(namespaces) == 1 && namespaces[0] == "all" {
+		namespaces = nil
 	}
-	if changed {
+	if len(namespaces) == 0 {
+		namespaces = client.GetConfig(c).Cluster.MappedNamespaces
+	}
+
+	if s.SetMappedNamespaces(c, namespaces) {
+		if len(namespaces) == 0 && s.CanWatchNamespaces(c) {
+			s.StartNamespaceWatcher(c)
+		}
 		s.currentInterceptsLock.Lock()
 		s.ingressInfo = nil
 		s.currentInterceptsLock.Unlock()

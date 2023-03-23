@@ -106,7 +106,7 @@ func (s *singleServiceSuite) Test_DockerRun() {
 		case <-time.After(30 * time.Second):
 			s.Fail("interceptor did not terminate")
 		}
-		itest.TelepresenceOk(ctx, "connect")
+		itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 		assertNotIntercepted(ctx)
 	})
 
@@ -122,7 +122,7 @@ func (s *singleServiceSuite) Test_DockerRun() {
 		case <-time.After(30 * time.Second):
 			s.Fail("interceptor did not terminate")
 		}
-		itest.TelepresenceOk(ctx, "connect")
+		itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 		assertNotIntercepted(ctx)
 	})
 }

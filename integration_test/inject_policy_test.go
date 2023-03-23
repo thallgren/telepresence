@@ -24,7 +24,11 @@ func (s *helmSuite) assertInjected(ctx context.Context, name, namespace string, 
 	s.T().Helper()
 	out, err := itest.KubectlOut(ctx, namespace, "get", "pods", "-l", "app="+name, "-o", "jsonpath={.items.*.spec.containers[?(@.name=='traffic-agent')].image}")
 	s.NoError(err)
-	n := "/" + s.AgentImageName() + ":"
+	n := "tel2"
+	if ai := itest.GetAgentImage(ctx); ai != nil {
+		n = ai.Name
+	}
+	n = "/" + n + ":"
 	if present {
 		s.Contains(out, n)
 	} else {
@@ -35,14 +39,18 @@ func (s *helmSuite) assertInjected(ctx context.Context, name, namespace string, 
 func (s *helmSuite) injectPolicyTest(ctx context.Context, policy agentconfig.InjectPolicy) {
 	itest.TelepresenceOk(ctx, "quit", "-s")
 	namespace := fmt.Sprintf("%s-%s", strings.ToLower(policy.String()), s.Suffix())
-	ctx = itest.WithEnv(ctx, map[string]string{"TELEPRESENCE_MANAGER_NAMESPACE": namespace})
 	itest.CreateNamespaces(ctx, namespace)
 	defer itest.DeleteNamespaces(ctx, namespace)
 
-	s.NoError(s.InstallTrafficManager(ctx, map[string]string{"agentInjector.injectPolicy": policy.String()}, namespace))
+	ctx = itest.WithNamespaces(ctx, &itest.Namespaces{
+		Namespace:         namespace,
+		ManagedNamespaces: []string{namespace},
+	})
+	s.NoError(s.TelepresenceHelmInstall(ctx, false, map[string]string{"agentInjector.injectPolicy": policy.String()}))
 	defer s.UninstallTrafficManager(ctx, namespace)
 
-	itest.TelepresenceOk(ctx, "connect")
+	ctx = itest.WithUser(ctx, namespace+":"+itest.TestUser)
+	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", namespace)
 	defer itest.TelepresenceOk(ctx, "quit", "-s")
 
 	itest.TelepresenceOk(ctx, "loglevel", "debug")
