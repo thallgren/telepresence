@@ -131,7 +131,11 @@ func (s *nsPair) tearDown(ctx context.Context) {
 func (s *nsPair) RollbackTM(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	require.NoError(getT(ctx), Run(ctx, "helm", "rollback", "--wait", "--namespace", s.ManagerNamespace(), "traffic-manager"))
+	err := Command(ctx, "helm", "rollback", "--no-hooks", "--wait", "--namespace", s.ManagerNamespace(), "traffic-manager").Run()
+	t := getT(ctx)
+	require.NoError(t, err)
+	require.NoError(t, RolloutStatusWait(ctx, s.Namespace, "deploy/traffic-manager"))
+	s.CapturePodLogs(ctx, "app=traffic-manager", "", s.Namespace)
 }
 
 func (s *nsPair) AppNamespace() string {

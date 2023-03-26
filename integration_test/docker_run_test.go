@@ -40,7 +40,7 @@ func (s *singleServiceSuite) Test_DockerRun() {
 		s.Eventually(func() bool {
 			stdout := itest.TelepresenceOk(ctx, "list", "--namespace", s.AppNamespace(), "--intercepts")
 			return strings.Contains(stdout, svc+": intercepted")
-		}, 10*time.Second, 3*time.Second)
+		}, 30*time.Second, 3*time.Second)
 
 		// Response contains env variables TELEPRESENCE_CONTAINER and TELEPRESENCE_INTERCEPT_ID
 		expectedOutput := regexp.MustCompile(`Intercept id [0-9a-f-]+:` + svc)

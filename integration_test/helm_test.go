@@ -13,14 +13,14 @@ import (
 
 type helmSuite struct {
 	itest.Suite
-	itest.HelmAndService
+	itest.SingleService
 	mgrSpace2 string
 	appSpace2 string
 }
 
 func init() {
-	itest.AddHelmAndServiceSuite("-1", "echo", func(h itest.HelmAndService) suite.TestingSuite {
-		s := &helmSuite{Suite: itest.Suite{Harness: h}, HelmAndService: h}
+	itest.AddSingleServiceSuite("", "echo", func(h itest.SingleService) suite.TestingSuite {
+		s := &helmSuite{Suite: itest.Suite{Harness: h}, SingleService: h}
 		suffix := itest.GetGlobalHarness(h.HarnessContext()).Suffix()
 		s.appSpace2, s.mgrSpace2 = itest.AppAndMgrNSName(suffix + "-2")
 		return s
@@ -30,10 +30,8 @@ func init() {
 func (s *helmSuite) SetupSuite() {
 	s.Suite.SetupSuite()
 	ctx := s.Context()
-	itest.TelepresenceQuitOk(ctx)
 	itest.CreateNamespaces(ctx, s.appSpace2, s.mgrSpace2)
 	itest.ApplyEchoService(ctx, s.ServiceName(), s.appSpace2, 80)
-	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 }
 
 func (s *helmSuite) TearDownSuite() {
@@ -90,6 +88,11 @@ func (s *helmSuite) Test_HelmWebhookDoesntInjectInUnmanagedNamespace() {
 
 func (s *helmSuite) Test_HelmMultipleInstalls() {
 	svc := s.ServiceName()
+	defer func() {
+		ctx := s.Context()
+		itest.TelepresenceDisconnectOk(ctx)
+		itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
+	}()
 
 	s.Run("Installs Successfully", func() {
 		ctx := itest.WithNamespaces(s.Context(), &itest.Namespaces{
@@ -98,7 +101,7 @@ func (s *helmSuite) Test_HelmMultipleInstalls() {
 		})
 		s.NoError(itest.Kubectl(ctx, s.mgrSpace2, "apply", "-f", filepath.Join("testdata", "k8s", "client_sa.yaml")))
 		itest.TelepresenceDisconnectOk(ctx)
-		s.NoError(s.TelepresenceHelmInstall(ctx, false, nil))
+		s.NoError(s.TelepresenceHelmInstall(ctx, false))
 	})
 
 	s.Run("Can be connected to", func() {
@@ -126,10 +129,9 @@ func (s *helmSuite) Test_HelmMultipleInstalls() {
 }
 
 func (s *helmSuite) Test_CollidingInstalls() {
-	defer itest.TelepresenceQuitOk(s.Context())
 	ctx := itest.WithNamespaces(s.Context(), &itest.Namespaces{
 		Namespace:         s.AppNamespace(),
 		ManagedNamespaces: []string{s.appSpace2},
 	})
-	s.Error(s.InstallTrafficManager(ctx, nil))
+	s.Error(s.TelepresenceHelmInstall(ctx, false))
 }

@@ -2,6 +2,7 @@ package patcher
 
 import (
 	"fmt"
+	"path/filepath"
 
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -42,4 +43,30 @@ func NeedsStubbedExec(rawConfig *clientcmdapi.Config) bool {
 		}
 	}
 	return false
+}
+
+// ReplacePathsWithStubs goes through the kubeconfig and replaces all paths with stubbed paths
+// that are <certsPath> + / + <basename of host path>. The implementation is simplistic and
+// relies on that the config has been minimized and thus contains at max three files (the ca,
+// the cert, and the key).
+// A slice with the original paths is returned.
+func ReplacePathsWithStubs(rawConfig *clientcmdapi.Config, certsPath string) []string {
+	var paths []string
+	stub := func(hostPath *string) {
+		if p := *hostPath; p != "" {
+			containerPath := certsPath + "/" + filepath.Base(p)
+			paths = append(paths, p)
+			*hostPath = containerPath
+		}
+	}
+	for _, kubeContext := range rawConfig.Contexts {
+		if authInfo, ok := rawConfig.AuthInfos[kubeContext.AuthInfo]; ok {
+			stub(&authInfo.ClientCertificate)
+			stub(&authInfo.ClientKey)
+		}
+	}
+	for _, cluster := range rawConfig.Clusters {
+		stub(&cluster.CertificateAuthority)
+	}
+	return paths
 }

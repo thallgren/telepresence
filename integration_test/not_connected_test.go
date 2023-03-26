@@ -1,6 +1,8 @@
 package integration_test
 
 import (
+	"fmt"
+	"regexp"
 	"runtime"
 
 	"github.com/stretchr/testify/suite"
@@ -15,25 +17,13 @@ type notConnectedSuite struct {
 }
 
 func init() {
-	itest.AddNamespacePairSuite("", func(h itest.NamespacePair) suite.TestingSuite {
+	itest.AddTrafficManagerSuite("", func(h itest.NamespacePair) suite.TestingSuite {
 		return &notConnectedSuite{Suite: itest.Suite{Harness: h}, NamespacePair: h}
 	})
 }
 
-func (s *notConnectedSuite) SetupSuite() {
-	s.Suite.SetupSuite()
-	ctx := s.Context()
-	require := s.Require()
-	require.NoError(s.TelepresenceHelmInstall(ctx, false, nil))
-	stdout := itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
-	s.Contains(stdout, "Connected to context")
-	s.CapturePodLogs(ctx, "app=traffic-manager", "", s.ManagerNamespace())
-	itest.TelepresenceDisconnectOk(ctx)
-}
-
-func (s *notConnectedSuite) TearDownSuite() {
-	ctx := itest.WithUser(s.Context(), "default")
-	itest.TelepresenceOk(ctx, "helm", "uninstall")
+func (s *notConnectedSuite) TearDownTest() {
+	itest.TelepresenceQuitOk(s.Context())
 }
 
 func (s *notConnectedSuite) Test_ConnectWithCommand() {
@@ -41,12 +31,10 @@ func (s *notConnectedSuite) Test_ConnectWithCommand() {
 	stdout := itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace(), "--", s.Executable(), "status")
 	s.Contains(stdout, "Connected to context")
 	s.Contains(stdout, "Kubernetes context:")
-	itest.TelepresenceDisconnectOk(ctx)
 }
 
 func (s *notConnectedSuite) Test_InvalidKubeconfig() {
 	ctx := s.Context()
-	itest.TelepresenceOk(ctx, "quit", "-s")
 	path := "/dev/null"
 	if runtime.GOOS == "windows" {
 		path = "C:\\NUL"
@@ -54,17 +42,14 @@ func (s *notConnectedSuite) Test_InvalidKubeconfig() {
 	badEnvCtx := itest.WithEnv(ctx, map[string]string{"KUBECONFIG": path})
 	_, stderr, err := itest.Telepresence(badEnvCtx, "connect")
 	s.Contains(stderr, "kubeconfig has no context definition")
-	itest.TelepresenceQuitOk(ctx) // process is started with bad env, so get rid of it
 	s.Error(err)
 }
 
 func (s *notConnectedSuite) Test_NonExistentContext() {
 	ctx := s.Context()
-
 	_, stderr, err := itest.Telepresence(ctx, "connect", "--context", "not-likely-to-exist")
 	s.Error(err)
 	s.Contains(stderr, `"not-likely-to-exist" does not exist`)
-	itest.TelepresenceDisconnectOk(ctx)
 }
 
 func (s *notConnectedSuite) Test_ConnectingToOtherNamespace() {
@@ -80,7 +65,7 @@ func (s *notConnectedSuite) Test_ConnectingToOtherNamespace() {
 			Namespace:         mgrSpace2,
 			ManagedNamespaces: []string{appSpace2},
 		})
-		s.NoError(s.TelepresenceHelmInstall(ctx, false, nil))
+		s.NoError(s.TelepresenceHelmInstall(ctx, false))
 	})
 
 	s.Run("Can be connected to with --manager-namespace-flag", func() {
@@ -113,4 +98,16 @@ func (s *notConnectedSuite) Test_ConnectingToOtherNamespace() {
 	s.Run("Uninstalls Successfully", func() {
 		s.UninstallTrafficManager(s.Context(), mgrSpace2)
 	})
+}
+
+func (s *notConnectedSuite) Test_ReportsNotConnected() {
+	ctx := s.Context()
+	itest.TelepresenceOk(itest.WithUser(ctx, "default"), "connect")
+	itest.TelepresenceDisconnectOk(ctx)
+	stdout := itest.TelepresenceOk(ctx, "version")
+	rxVer := regexp.QuoteMeta(s.TelepresenceVersion())
+	s.Regexp(fmt.Sprintf(`Client\s*: %s`, rxVer), stdout)
+	s.Regexp(fmt.Sprintf(`Root Daemon\s*: %s`, rxVer), stdout)
+	s.Regexp(fmt.Sprintf(`User Daemon\s*: %s`, rxVer), stdout)
+	s.Regexp(`Traffic Manager\s*: not connected`, stdout)
 }

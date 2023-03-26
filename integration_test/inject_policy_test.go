@@ -11,7 +11,7 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/agentconfig"
 )
 
-func (s *helmSuite) applyPolicyApp(ctx context.Context, name, namespace string, wg *sync.WaitGroup) {
+func (s *installSuite) applyPolicyApp(ctx context.Context, name, namespace string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	s.T().Helper()
 	manifest := filepath.Join("testdata", "k8s", name+".yaml")
@@ -19,7 +19,7 @@ func (s *helmSuite) applyPolicyApp(ctx context.Context, name, namespace string, 
 	s.NoError(itest.RolloutStatusWait(ctx, namespace, "deploy/"+name))
 }
 
-func (s *helmSuite) assertInjected(ctx context.Context, name, namespace string, present bool, wg *sync.WaitGroup) {
+func (s *installSuite) assertInjected(ctx context.Context, name, namespace string, present bool, wg *sync.WaitGroup) {
 	defer wg.Done()
 	s.T().Helper()
 	out, err := itest.KubectlOut(ctx, namespace, "get", "pods", "-l", "app="+name, "-o", "jsonpath={.items.*.spec.containers[?(@.name=='traffic-agent')].image}")
@@ -36,8 +36,7 @@ func (s *helmSuite) assertInjected(ctx context.Context, name, namespace string, 
 	}
 }
 
-func (s *helmSuite) injectPolicyTest(ctx context.Context, policy agentconfig.InjectPolicy) {
-	itest.TelepresenceOk(ctx, "quit", "-s")
+func (s *installSuite) injectPolicyTest(ctx context.Context, policy agentconfig.InjectPolicy) {
 	namespace := fmt.Sprintf("%s-%s", strings.ToLower(policy.String()), s.Suffix())
 	itest.CreateNamespaces(ctx, namespace)
 	defer itest.DeleteNamespaces(ctx, namespace)
@@ -46,7 +45,7 @@ func (s *helmSuite) injectPolicyTest(ctx context.Context, policy agentconfig.Inj
 		Namespace:         namespace,
 		ManagedNamespaces: []string{namespace},
 	})
-	s.NoError(s.TelepresenceHelmInstall(ctx, false, map[string]string{"agentInjector.injectPolicy": policy.String()}))
+	s.NoError(s.TelepresenceHelmInstall(ctx, false, "--set", "agentInjector.injectPolicy="+policy.String()))
 	defer s.UninstallTrafficManager(ctx, namespace)
 
 	ctx = itest.WithUser(ctx, namespace+":"+itest.TestUser)
@@ -93,7 +92,7 @@ func (s *helmSuite) injectPolicyTest(ctx context.Context, policy agentconfig.Inj
 	wg.Wait()
 }
 
-func (s *helmSuite) TestInjectPolicy() {
+func (s *installSuite) TestInjectPolicy() {
 	for _, policy := range []agentconfig.InjectPolicy{agentconfig.OnDemand, agentconfig.WhenEnabled} {
 		s.Run(policy.String(), func() {
 			s.injectPolicyTest(s.Context(), policy)

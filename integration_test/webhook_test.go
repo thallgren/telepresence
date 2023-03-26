@@ -24,9 +24,7 @@ func init() {
 func (s *webhookSuite) Test_AutoInjectedAgent() {
 	ctx := s.Context()
 	s.ApplyApp(ctx, "echo-auto-inject", "deploy/echo-auto-inject")
-	defer func() {
-		s.NoError(s.Kubectl(ctx, "delete", "svc,deploy", "echo-auto-inject"))
-	}()
+	defer s.DeleteSvcAndWorkload(ctx, "deploy", "echo-auto-inject")
 
 	require := s.Require()
 	require.Eventually(func() bool {
@@ -53,7 +51,7 @@ func (s *notConnectedSuite) Test_AgentImageFromConfig() {
 	})
 
 	require := s.Require()
-	require.NoError(s.TelepresenceHelmInstall(itest.WithAgentImage(ctx, nil), true, nil))
+	require.NoError(s.TelepresenceHelmInstall(itest.WithAgentImage(ctx, nil), true))
 	defer s.RollbackTM(ctx)
 
 	image, err := itest.KubectlOut(ctx, s.ManagerNamespace(),

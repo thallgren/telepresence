@@ -214,7 +214,12 @@ func (kc *Cluster) refreshNamespaces(c context.Context) {
 	defer kc.nsLock.Unlock()
 	var nss []string
 	if kc.namespaceWatcherSnapshot == nil {
+		// No permission to watch namespaces. Use the mapped-namespaces instead.
 		nss = kc.MappedNamespaces
+		if len(nss) == 0 {
+			// No mapped namespaces exists. Fallback to what's defined in the kube-context (will be "default" if none was defined).
+			nss = []string{kc.Namespace}
+		}
 	} else {
 		nss = make([]string, len(kc.namespaceWatcherSnapshot))
 		i := 0

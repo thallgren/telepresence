@@ -69,7 +69,7 @@ type Cluster interface {
 	PackageHelmChart(ctx context.Context) (string, error)
 	GetValuesForHelm(ctx context.Context, values map[string]string, release bool) []string
 	GetK8SCluster(ctx context.Context, context, managerNamespace string) (context.Context, *k8s.Cluster, error)
-	TelepresenceHelmInstall(ctx context.Context, upgrade bool, values map[string]string) error
+	TelepresenceHelmInstall(ctx context.Context, upgrade bool, args ...string) error
 }
 
 // The cluster is created once and then reused by all tests. It ensures that:
@@ -536,12 +536,7 @@ func (s *cluster) installChart(ctx context.Context, release bool, chartFilename 
 	return err
 }
 
-func (s *cluster) TelepresenceHelmInstall(ctx context.Context, upgrade bool, values map[string]string) error {
-	settings := make([]string, 0, len(values)*2)
-	for k, v := range values {
-		settings = append(settings, "--set", k+"="+v)
-	}
-
+func (s *cluster) TelepresenceHelmInstall(ctx context.Context, upgrade bool, settings ...string) error {
 	nss := GetNamespaces(ctx)
 	subjectNames := []string{TestUser}
 	subjects := make([]rbac.Subject, len(subjectNames))
@@ -603,6 +598,7 @@ func (s *cluster) TelepresenceHelmInstall(ctx context.Context, upgrade bool, val
 	verb := "install"
 	if upgrade {
 		verb = "upgrade"
+		settings = append(settings, "--reuse-values")
 	}
 	args := []string{"helm", verb, "-n", nss.Namespace,
 		"-f", valuesFile,
@@ -646,10 +642,13 @@ func (s *cluster) UninstallTrafficManager(ctx context.Context, managerNamespace 
 
 func (s *cluster) GetK8SCluster(ctx context.Context, context, managerNamespace string) (context.Context, *k8s.Cluster, error) {
 	_ = os.Setenv("KUBECONFIG", KubeConfig(ctx))
-	cfgAndFlags, err := client.NewKubeconfig(ctx, map[string]string{
-		"context":   context,
+	flags := map[string]string{
 		"namespace": managerNamespace,
-	}, managerNamespace)
+	}
+	if context != "" {
+		flags["context"] = context
+	}
+	cfgAndFlags, err := client.NewKubeconfig(ctx, flags, managerNamespace)
 	if err != nil {
 		return ctx, nil, err
 	}
@@ -690,8 +689,8 @@ func TelepresenceOk(ctx context.Context, args ...string) string {
 	t := getT(ctx)
 	t.Helper()
 	stdout, stderr, err := Telepresence(ctx, args...)
-	require.NoError(t, err, "telepresence was unable to run, stdout %s, stderr: %s", stdout, stderr)
-	require.Empty(t, stderr, "Expected stderr to be empty, but got: %s", stderr)
+	assert.NoError(t, err, "telepresence was unable to run, stdout %s, stderr: %s", stdout, stderr)
+	assert.Empty(t, stderr, "Expected stderr to be empty, but got: %s", stderr)
 	return stdout
 }
 
@@ -754,7 +753,8 @@ func TelepresenceDisconnectOk(ctx context.Context) {
 func AssertDisconnectOutput(ctx context.Context, stdout string) {
 	t := getT(ctx)
 	assert.True(t, strings.Contains(stdout, "Telepresence Daemons disconnecting...done") ||
-		strings.Contains(stdout, "Telepresence Daemons are already disconnected"))
+		strings.Contains(stdout, "Telepresence Daemons are already disconnected") ||
+		strings.Contains(stdout, "Telepresence Daemons have already quit"))
 	if t.Failed() {
 		t.Logf("Disconnect output was %q", stdout)
 	}
@@ -1004,24 +1004,23 @@ func WithKubeConfigExtension(ctx context.Context, extProducer func(*api.Cluster)
 	t := getT(ctx)
 	cfg, err := clientcmd.LoadFromFile(kc)
 	require.NoError(t, err, "unable to read %s", kc)
-	cluster := cfg.Clusters["default"]
-	require.NotNil(t, cluster, "unable to get default cluster from config")
+	cc := cfg.Contexts[cfg.CurrentContext]
+	require.NotNil(t, cc, "unable to get current context from config")
+	cluster := cfg.Clusters[cc.Cluster]
+	require.NotNil(t, cluster, "unable to get current cluster from config")
 
 	raw, err := json.Marshal(extProducer(cluster))
 	require.NoError(t, err, "unable to json.Marshal extension map")
 	cluster.Extensions = map[string]k8sruntime.Object{"telepresence.io": &k8sruntime.Unknown{Raw: raw}}
 
-	context := &api.Context{
-		Cluster:   "extra",
-		AuthInfo:  "default",
-		Namespace: "default",
-	}
+	context := *cc
+	context.Cluster = "extra"
 	cfg = &api.Config{
 		Kind:           "Config",
 		APIVersion:     "v1",
 		Preferences:    api.Preferences{},
 		Clusters:       map[string]*api.Cluster{"extra": cluster},
-		Contexts:       map[string]*api.Context{"extra": context},
+		Contexts:       map[string]*api.Context{"extra": &context},
 		CurrentContext: "extra",
 	}
 	kubeconfigFileName := filepath.Join(t.TempDir(), "kubeconfig")

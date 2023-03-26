@@ -17,7 +17,7 @@ type dockerDaemonSuite struct {
 }
 
 func init() {
-	itest.AddNamespacePairSuite("", func(h itest.NamespacePair) suite.TestingSuite {
+	itest.AddTrafficManagerSuite("", func(h itest.NamespacePair) suite.TestingSuite {
 		return &dockerDaemonSuite{Suite: itest.Suite{Harness: h}, NamespacePair: h}
 	})
 }
@@ -35,17 +35,15 @@ func (s *dockerDaemonSuite) SetupSuite() {
 		return
 	}
 	s.Suite.SetupSuite()
-	s.Require().NoError(s.TelepresenceHelmInstall(s.Context(), true, nil))
 }
 
-func (s *dockerDaemonSuite) TearDownSuite() {
-	itest.TelepresenceOk(itest.WithUser(s.Context(), "default"), "helm", "uninstall", "-n", s.ManagerNamespace())
+func (s *dockerDaemonSuite) TearDownTest() {
+	itest.TelepresenceQuitOk(s.Context())
 }
 
 func (s *dockerDaemonSuite) Test_DockerDaemon_status() {
 	ctx := s.Context()
 	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
-	defer itest.TelepresenceQuitOk(ctx)
 
 	jsOut := itest.TelepresenceOk(ctx, "status", "--output", "json")
 
@@ -73,7 +71,6 @@ func (s *dockerDaemonSuite) Test_DockerDaemon_hostDaemonConflict() {
 
 func (s *dockerDaemonSuite) Test_DockerDaemon_daemonHostNotConflict() {
 	ctx := s.Context()
-	defer itest.TelepresenceQuitOk(ctx)
 	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace())
 	itest.TelepresenceOk(itest.WithUseDocker(ctx, false), "connect", "--manager-namespace", s.ManagerNamespace())
 }

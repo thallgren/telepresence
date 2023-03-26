@@ -39,7 +39,7 @@ func (s *notConnectedSuite) Test_Uninstall() {
 
 	stdout = itest.TelepresenceOk(ctx, "helm", "uninstall", "-n", s.ManagerNamespace())
 	defer func() {
-		require.NoError(s.InstallTrafficManager(ctx, nil))
+		require.NoError(s.TelepresenceHelmInstall(ctx, false))
 	}()
 	s.Contains(stdout, "Traffic Manager uninstalled successfully")
 

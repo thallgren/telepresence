@@ -44,7 +44,6 @@ func (s *notConnectedSuite) Test_APIServerIsProxied() {
 	defaultGW, err := routing.DefaultRoute(ctx)
 	require.NoError(err)
 	var ips []net.IP
-	itest.TelepresenceQuitOk(ctx)
 
 	ctx = itest.WithKubeConfigExtension(ctx, func(cluster *api.Cluster) map[string]any {
 		var apiServers []string
@@ -61,7 +60,6 @@ func (s *notConnectedSuite) Test_APIServerIsProxied() {
 	})
 
 	itest.TelepresenceOk(ctx, "connect", "--context", "extra")
-	defer itest.TelepresenceQuitOk(ctx) // WithKubeConfigExtension sets env which gets sticky, so quitting is a must here
 
 	expectedLen := len(ips)
 	s.Eventually(func() bool {
@@ -86,7 +84,6 @@ func (s *notConnectedSuite) Test_APIServerIsProxied() {
 func (s *notConnectedSuite) Test_NeverProxy() {
 	require := s.Require()
 	ctx := s.Context()
-	itest.TelepresenceQuitOk(ctx)
 
 	svcName := "echo-never-proxy"
 	itest.ApplyEchoService(ctx, svcName, s.AppNamespace(), 8080)
@@ -105,7 +102,6 @@ func (s *notConnectedSuite) Test_NeverProxy() {
 		return map[string]any{"never-proxy": []string{ip + "/32"}}
 	})
 	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace(), "--context", "extra")
-	defer itest.TelepresenceQuitOk(ctx)
 
 	// The cluster's IP address will also be never proxied, so we gotta account for that.
 	neverProxiedCount := len(ips) + 1
@@ -128,7 +124,6 @@ func (s *notConnectedSuite) Test_NeverProxy() {
 
 func (s *notConnectedSuite) Test_ConflictingProxies() {
 	ctx := s.Context()
-	itest.TelepresenceQuitOk(ctx)
 
 	testIP := &net.IPNet{
 		IP:   net.ParseIP("10.128.0.32"),
@@ -186,7 +181,6 @@ func (s *notConnectedSuite) Test_ConflictingProxies() {
 
 func (s *notConnectedSuite) Test_DNSIncludes() {
 	ctx := s.Context()
-	itest.TelepresenceQuitOk(ctx)
 
 	ctx = itest.WithKubeConfigExtension(ctx, func(cluster *api.Cluster) map[string]any {
 		return map[string]any{"dns": map[string][]string{"include-suffixes": {".org"}}}
@@ -201,7 +195,6 @@ func (s *notConnectedSuite) Test_DNSIncludes() {
 	require.Contains(stdout, "    includeSuffixes:\n        - .org")
 
 	itest.TelepresenceOk(ctx, "connect", "--manager-namespace", s.ManagerNamespace(), "--context", "extra")
-	defer itest.TelepresenceQuitOk(ctx)
 
 	retryCount := 0
 	s.Eventually(func() bool {

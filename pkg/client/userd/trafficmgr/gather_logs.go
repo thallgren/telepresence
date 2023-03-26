@@ -29,27 +29,28 @@ import (
 func getPodLog(ctx context.Context, exportDir string, result *sync.Map, podsAPI typed.PodInterface, pod *core.Pod, container string, podYAML bool) {
 	podLog := pod.Name + "." + pod.Namespace + ".log"
 	req := podsAPI.GetLogs(pod.Name, &core.PodLogOptions{Container: container})
-	logStream, err := req.Stream(ctx)
-	if err != nil {
+	var err error
+	defer func() {
+		if err != nil {
+			dlog.Error(ctx, err)
+			result.Store(podLog, err.Error())
+		}
+	}()
+	var logStream io.ReadCloser
+	if logStream, err = req.Stream(ctx); err != nil {
 		err = fmt.Errorf("failed to get log for %s.%s: %w", pod.Name, pod.Namespace, err)
-		dlog.Error(ctx, err)
-		result.Store(podLog, err.Error())
 		return
 	}
 	defer logStream.Close()
 
-	f, err := os.Create(filepath.Join(exportDir, podLog))
-	if err != nil {
-		dlog.Error(ctx, err)
-		result.Store(podLog, err.Error())
+	var f *os.File
+	if f, err = os.Create(filepath.Join(exportDir, podLog)); err != nil {
 		return
 	}
 	defer f.Close()
 
 	if _, err = io.Copy(f, logStream); err != nil {
 		err = fmt.Errorf("failed writing log to buffer: %w", err)
-		dlog.Error(ctx, err)
-		result.Store(podLog, err.Error())
 		return
 	}
 	result.Store(podLog, "ok")
@@ -60,12 +61,9 @@ func getPodLog(ctx context.Context, exportDir string, result *sync.Map, podsAPI 
 		podYaml := pod.Name + "." + pod.Namespace + ".yaml"
 		if b, err = yaml.Marshal(pod); err != nil {
 			err = fmt.Errorf("failed marshaling pod yaml: %w", err)
-			dlog.Error(ctx, err)
-			result.Store(podYaml, err.Error())
 			return
 		}
 		if err = os.WriteFile(filepath.Join(exportDir, podYaml), b, 0o666); err != nil {
-			result.Store(podYaml, err.Error())
 			return
 		}
 		result.Store(podYaml, "ok")

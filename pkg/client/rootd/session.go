@@ -418,7 +418,9 @@ func (s *Session) refreshSubnets(ctx context.Context) (err error) {
 	desired := make([]*net.IPNet, len(s.clusterSubnets)+len(s.alsoProxySubnets))
 	copy(desired, s.clusterSubnets)
 	copy(desired[len(s.clusterSubnets):], s.alsoProxySubnets)
+	dlog.Debugf(ctx, "before unique desired: %v", desired)
 	desired = subnet.Unique(desired)
+	dlog.Debugf(ctx, "after unique desired: %v", desired)
 
 	// Remove all no longer desired subnets from the t.curSubnets
 	var removed []*net.IPNet

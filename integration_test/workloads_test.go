@@ -10,9 +10,8 @@ import (
 func (s *connectedSuite) successfulIntercept(tp, svc, port string) {
 	ctx := s.Context()
 	s.ApplyApp(ctx, svc, strings.ToLower(tp)+"/"+svc)
-	defer func() {
-		_ = s.Kubectl(ctx, "delete", "svc,"+strings.ToLower(tp), svc)
-	}()
+	defer s.DeleteSvcAndWorkload(ctx, "deploy", "echo-auto-inject")
+
 	require := s.Require()
 
 	require.Eventually(

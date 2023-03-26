@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -80,10 +81,9 @@ func DaemonOptions(ctx context.Context, name string) ([]string, *net.TCPAddr, er
 	addr := as[0]
 	port := addr.Port
 	opts := []string{
-		"--name", SafeContainerName(containerNamePrefix + name),
-		"--network", "telepresence",
 		"--cap-add", "NET_ADMIN",
 		"--device", "/dev/net/tun:/dev/net/tun",
+		"--network", "telepresence",
 		"-e", fmt.Sprintf("TELEPRESENCE_UID=%d", os.Getuid()),
 		"-e", fmt.Sprintf("TELEPRESENCE_GID=%d", os.Getgid()),
 		"-p", fmt.Sprintf("%s:%d", addr, port),
@@ -311,6 +311,24 @@ func EnableK8SAuthenticator(ctx context.Context) error {
 		}
 	}
 
+	copyFile := func(src, dst string) {
+		in, err := os.Open(src)
+		if err != nil {
+			dlog.Error(ctx, err)
+			return
+		}
+		defer in.Close()
+		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			dlog.Error(ctx, err)
+			return
+		}
+		defer out.Close()
+		if _, err = io.Copy(out, in); err != nil {
+			dlog.Error(ctx, err)
+		}
+	}
+
 	// Store the file using its context name under the <telepresence cache>/kube directory
 	const kubeConfigs = "kube"
 	kubeConfigFile := config.CurrentContext
@@ -321,6 +339,19 @@ func EnableK8SAuthenticator(ctx context.Context) error {
 	kubeConfigDir := filepath.Join(tpCache, kubeConfigs)
 	if err = os.MkdirAll(kubeConfigDir, 0o700); err != nil {
 		return err
+	}
+	certPaths := patcher.ReplacePathsWithStubs(&config, dockerTpCache+"/"+kubeConfigs+"/"+"certs")
+	if len(certPaths) > 0 {
+		certsDir := filepath.Join(kubeConfigDir, "certs")
+		if err = os.Mkdir(certsDir, 0o700); err != nil {
+			if !os.IsExist(err) {
+				return err
+			}
+			err = nil
+		}
+		for _, hostPath := range certPaths {
+			copyFile(hostPath, filepath.Join(certsDir, filepath.Base(hostPath)))
+		}
 	}
 	if err = clientcmd.WriteToFile(config, filepath.Join(kubeConfigDir, kubeConfigFile)); err != nil {
 		return err
@@ -362,8 +393,9 @@ func LaunchDaemon(ctx context.Context, name string) (conn *grpc.ClientConn, err 
 	allArgs = append(allArgs, opts...)
 	allArgs = append(allArgs, image)
 	allArgs = append(allArgs, args...)
+	var cid string
 	for i := 1; ; i++ {
-		err = tryLaunch(ctx, addr.Port, name, allArgs)
+		cid, err = tryLaunch(ctx, addr.Port, name, allArgs)
 		if err != nil {
 			if i < 6 && strings.Contains(err.Error(), "already in use by container") {
 				// This may happen if the daemon has died (and hence, we never discovered it), but
@@ -375,10 +407,38 @@ func LaunchDaemon(ctx context.Context, name string) (conn *grpc.ClientConn, err 
 		}
 		break
 	}
+	detectAndAddMinikubeNetwork(ctx, cid)
+
 	return ConnectDaemon(ctx, addr.String())
 }
 
-func tryLaunch(ctx context.Context, port int, name string, args []string) error {
+// detectAndAddMinikubeNetwork checks for a network named "minikube", and adds it to the
+// running container if present.
+//
+// This takes care of the use-case when minikube is installed with a docker driver and
+// uses the default docker network name.
+func detectAndAddMinikubeNetwork(ctx context.Context, cid string) {
+	cmd := proc.StdCommand(ctx, "docker", "network", "inspect", "minikube")
+	cmd.Stderr = io.Discard
+	cmd.Stdout = io.Discard
+	if cmd.Run() != nil {
+		return
+	}
+	// The minikube network is present. Let's try and add it.
+	stderr := bytes.Buffer{}
+	cmd = proc.StdCommand(ctx, "docker", "network", "connect", "minikube", cid)
+	cmd.Stderr = &stderr
+	cmd.Stdout = io.Discard
+	if err := cmd.Run(); err != nil {
+		es := stderr.String()
+		if es != "" {
+			dlog.Error(ctx, es)
+		}
+		dlog.Errorf(ctx, "failed to add minikube network: %v", err)
+	}
+}
+
+func tryLaunch(ctx context.Context, port int, name string, args []string) (string, error) {
 	stdErr := bytes.Buffer{}
 	stdOut := bytes.Buffer{}
 	dlog.Debug(ctx, shellquote.ShellString("docker", args))
@@ -391,11 +451,12 @@ func tryLaunch(ctx context.Context, port int, name string, args []string) error 
 		if errStr == "" {
 			errStr = err.Error()
 		}
-		return fmt.Errorf("launch of daemon container failed: %s", errStr)
+		return "", fmt.Errorf("launch of daemon container failed: %s", errStr)
 	}
-	return cache.SaveDaemonInfo(ctx,
+	cid := strings.TrimSpace(stdOut.String())
+	return cid, cache.SaveDaemonInfo(ctx,
 		&cache.DaemonInfo{
-			Options:     map[string]string{"cid": strings.TrimSpace(stdOut.String())},
+			Options:     map[string]string{"cid": cid},
 			InDocker:    true,
 			DaemonPort:  port,
 			KubeContext: name,

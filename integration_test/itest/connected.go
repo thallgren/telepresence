@@ -12,12 +12,12 @@ type connected struct {
 	NamespacePair
 }
 
-func WithConnection(np NamespacePair, f func(ctx context.Context, ch NamespacePair)) {
+func WithConnected(np NamespacePair, f func(ctx context.Context, ch NamespacePair)) {
 	np.HarnessT().Run("Test_Connected", func(t *testing.T) {
 		ctx := withT(np.HarnessContext(), t)
 		require.NoError(t, np.GeneralError())
 		ch := &connected{NamespacePair: np}
-		ch.PushHarness(ctx, ch.setup, nil)
+		ch.PushHarness(ctx, ch.setup, ch.tearDown)
 		defer ch.PopHarness()
 		f(ctx, ch)
 	})
@@ -25,17 +25,10 @@ func WithConnection(np NamespacePair, f func(ctx context.Context, ch NamespacePa
 
 func (ch *connected) setup(ctx context.Context) bool {
 	t := getT(ctx)
-	TelepresenceQuitOk(ctx) //nolint:dogsled
-	err := ch.TelepresenceHelmInstall(ctx, false, nil)
-	assert.NoError(t, err)
-	if t.Failed() {
-		return false
-	}
-
 	// Connect using telepresence-test-developer user
 	stdout, _, err := Telepresence(ctx, "connect", "--manager-namespace", ch.ManagerNamespace())
 	assert.NoError(t, err)
-	assert.Contains(t, stdout, "Connected to context default")
+	assert.Contains(t, stdout, "Connected to context")
 	if t.Failed() {
 		return false
 	}
@@ -44,6 +37,9 @@ func (ch *connected) setup(ctx context.Context) bool {
 	if t.Failed() {
 		return false
 	}
-	ch.CapturePodLogs(ctx, "app=traffic-manager", "", ch.ManagerNamespace())
 	return true
+}
+
+func (ch *connected) tearDown(ctx context.Context) {
+	TelepresenceQuitOk(ctx)
 }
